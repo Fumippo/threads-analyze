@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>スレ・長文テキスト分析器 v5.0</title>
+  <title>スレ・長文テキスト分析器 v6.0</title>
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <style>
@@ -55,7 +55,7 @@
 </head>
 <body>
 <header>
-  <h1>スレ・長文テキスト分析器 <small style="font-size:.45em;color:var(--accent)">v5.0</small></h1>
+  <h1>スレ・長文テキスト分析器 <small style="font-size:.45em;color:var(--accent)">v6.0</small></h1>
   <div class="muted">PDF / TXT / HTMLを端末内で解析。レス速度、参加者、返信網、頻出句、コピペ、区間ごとの流行語まで一気に出します。</div>
 </header>
 <main>
@@ -166,10 +166,11 @@
 <script>
 'use strict';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/';
+pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + 'build/pdf.worker.min.js';
 
 const $ = (id) => document.getElementById(id);
-const state = { files: [], pages: [], posts: [], analysis: null, sourceNames: [] };
+const state = { files: [], pages: [], posts: [], analysis: null, sourceNames: [], archiveMode:false, pdfExtractionMode:'', pdfExtractionProbe:null };
 const plotConfig = {responsive:true, displaylogo:false, modeBarButtonsToRemove:['lasso2d','select2d']};
 const layoutBase = {paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)', font:{color:'#dbe7ff'}, margin:{l:55,r:20,t:20,b:55}, xaxis:{gridcolor:'#2b3658'}, yaxis:{gridcolor:'#2b3658'}};
 
@@ -305,18 +306,26 @@ function evaluatePdfCandidate(pageTexts,label,sourceName){
   const uniqueNums=new Set(parsed.map(p=>p.num));
   const dates=parsed.filter(p=>p.date && parseDate(p.date)).length;
   const ids=parsed.filter(p=>p.id).length;
-  const names=parsed.filter(p=>p.name).length;
+  const names=parsed.filter(p=>String(p.name||'').trim()).length;
+  const bodies=parsed.filter(p=>String(p.body||'').trim()).length;
   const bodyChars=parsed.reduce((s,p)=>s+String(p.body||'').length,0);
+  const cjkChars=parsed.reduce((s,p)=>s+((String(p.name||'')+'\n'+String(p.body||'')).match(/[\u3040-\u30ff\u3400-\u9fff]/g)||[]).length,0);
   const expected=uniqueNums.has(1000)?1000:(uniqueNums.size?Math.max(...uniqueNums):0);
   const coverage=expected?uniqueNums.size/expected:0;
-  // 実際にパーサーへ通した結果で選ぶ。マーカーが見えただけで勝利宣言する旧仕様は廃止。
-  const score=uniqueNums.size*1e9+dates*1e6+ids*1e4+names*100+Math.min(bodyChars,999999);
-  return {label,pages,parsed,unique:uniqueNums.size,dates,ids,names,bodyChars,coverage,score};
+  // レス番号だけ拾って本文を捨てる候補を選ばない。
+  const score=uniqueNums.size*1e9+dates*1e6+ids*1e4+bodies*1e3+names*100+Math.min(bodyChars,999999);
+  return {label,pages,parsed,unique:uniqueNums.size,dates,ids,names,bodies,bodyChars,cjkChars,coverage,score};
 }
 
 async function extractPdf(file,fi,total){
   const buf=await file.arrayBuffer();
-  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const pdf=await pdfjsLib.getDocument({
+    data:buf,
+    cMapUrl:PDFJS_BASE+'cmaps/',
+    cMapPacked:true,
+    standardFontDataUrl:PDFJS_BASE+'standard_fonts/',
+    useSystemFonts:true
+  }).promise;
   const streamPages=[],spatialPages=[];
   for(let i=1;i<=pdf.numPages;i++){
     setStatus(`PDF抽出中: ${file.name} ${i}/${pdf.numPages}ページ（${fi+1}/${total}ファイル）`);
@@ -331,8 +340,8 @@ async function extractPdf(file,fi,total){
   const chosen=a.score>=b.score?a:b;
   state.pdfExtractionMode=chosen.label;
   state.pdfExtractionProbe={
-    stream:{unique:a.unique,dates:a.dates,ids:a.ids,names:a.names,coverage:a.coverage},
-    spatial:{unique:b.unique,dates:b.dates,ids:b.ids,names:b.names,coverage:b.coverage},
+    stream:{unique:a.unique,dates:a.dates,ids:a.ids,names:a.names,bodies:a.bodies,bodyChars:a.bodyChars,cjkChars:a.cjkChars,coverage:a.coverage},
+    spatial:{unique:b.unique,dates:b.dates,ids:b.ids,names:b.names,bodies:b.bodies,bodyChars:b.bodyChars,cjkChars:b.cjkChars,coverage:b.coverage},
     chosen:chosen.label
   };
   return chosen.pages.map(p=>p.text);
@@ -380,7 +389,8 @@ function parseAllPages(pages){
   const joined=pages.map(p=>p.text).join('\n');
   const markerCount=(joined.match(/▾\s*\d{1,4}/g)||[]).length;
   let posts;
-  if(markerCount>=5) posts=parseArchivePages(pages);
+  state.archiveMode=markerCount>=5;
+  if(state.archiveMode) posts=parseArchivePages(pages);
   else {
     posts=parseDatStyle(joined,pages[0]?.source||'text');
     if(posts.length<5) posts=parseFallback(joined,pages[0]?.source||'text');
@@ -481,8 +491,11 @@ function parseArchivePages(pages){
         if(/^NG(?:\s+NG)?\s*$/.test(head[j].trim()) && ngIdx<0)ngIdx=j;
       }
 
-      // 同一行に「名前 日時 ID」が全部乗っていても名前だけを取り出す。
-      for(let j=0;j<Math.min(4,head.length);j++){
+      // 名前は日時/NGより前、または同じ行にしか存在しない。
+      // 日時の次にある本文1行目を「名前」として強奪する旧挙動を禁止。
+      const boundaryCandidates=[dateIdx,ngIdx].filter(x=>x>=0);
+      const nameBoundary=boundaryCandidates.length?Math.min(...boundaryCandidates):Math.min(1,head.length-1);
+      for(let j=0;j<=nameBoundary && j<head.length;j++){
         let stripped=head[j]
           .replace(dateRe,' ')
           .replace(/(?:^|\s)ID:[^\s]+/g,' ')
@@ -552,7 +565,7 @@ async function analyzeAll(){
     state.analysis=computeAnalysis(posts); setStatus('グラフを描画中…'); await tick();
     renderAll(state.analysis); $('results').classList.remove('hidden');
     const extra=posts.length-state.analysis.summary.posts;
-    setStatus(`完了[v5.0]: ${state.analysis.summary.posts}レスを解析しました${extra>0?`（終了表示など${extra}件を除外）`:''}。`);
+    setStatus(`完了[v6.0]: ${state.analysis.summary.posts}レスを解析しました${extra>0?`（終了表示など${extra}件を除外）`:''}。`);
   }catch(err){ console.error(err); setStatus('解析失敗: '+err.message); }
   finally{$('analyzeBtn').disabled=false;}
 }
@@ -579,6 +592,8 @@ function computeAnalysis(posts){
   const keywordTrend=keywords.map(k=>({keyword:k,values:segments.map(s=>s.posts.filter(p=>p.body.normalize('NFKC').toLowerCase().includes(k.normalize('NFKC').toLowerCase())).length)}));
   const dateCoverage=dated.length/Math.max(1,valid.length);
   const idCoverage=valid.filter(p=>p.id).length/Math.max(1,valid.length);
+  const nameCoverage=valid.filter(p=>String(p.name||'').trim()).length/Math.max(1,valid.length);
+  const bodyCoverage=valid.filter(p=>String(p.body||'').trim()).length/Math.max(1,valid.length);
   const uniqueNums=new Set(valid.map(p=>p.num).filter(Number.isFinite));
   const maxNum=uniqueNums.size?Math.max(...uniqueNums):0;
   const expectedMax=maxNum>=900?1000:maxNum;
@@ -587,6 +602,7 @@ function computeAnalysis(posts){
   const numberCoverage=expectedMax?uniqueNums.size/expectedMax:NaN;
   const timeReliable=dateCoverage>=.80 && Number.isFinite(duration) && duration>0;
   const idReliable=idCoverage>=.80;
+  const archiveTextReliable=!state.archiveMode || (nameCoverage>=.80 && bodyCoverage>=.80);
   const giniId=idReliable?gini([...idCounts.values()]):NaN;
   const totalChars=Math.max(1,valid.reduce((s,p)=>s+p.length,0));
   const artifactChars=valid.reduce((s,p)=>s+(p.body.match(/[�\u0000-\u0008\u000b\u000c\u000e-\u001f\u3099\u309a]/g)||[]).length,0);
@@ -596,8 +612,8 @@ function computeAnalysis(posts){
     medianGap:timeReliable?median(gaps):NaN,p90Gap:timeReliable?quantile(gaps,.9):NaN,
     replyRate:valid.filter(p=>p.replyTargets.length).length/Math.max(1,valid.length),
     urlRate:valid.filter(p=>p.hasUrl).length/Math.max(1,valid.length),aaRate:valid.filter(p=>p.hasAA).length/Math.max(1,valid.length),longRate:valid.filter(p=>p.isLong).length/Math.max(1,valid.length),
-    duplicateRate:duplicatePosts/Math.max(1,valid.length),giniId,dateCoverage,idCoverage,numberCoverage,missingNumbers,
-    replacementRate:artifactChars/totalChars,timeReliable,idReliable
+    duplicateRate:duplicatePosts/Math.max(1,valid.length),giniId,dateCoverage,idCoverage,nameCoverage,bodyCoverage,numberCoverage,missingNumbers,
+    replacementRate:artifactChars/totalChars,timeReliable,idReliable,archiveTextReliable
   };
   return {posts:valid,dated,idCounts,nameCounts,exactGroups,nearDuplicates,categories,catCounts,replyLinks,targetCounts,byNum,timeline,interval,segments,phraseData,lineData,segmentTerms,keywordTrend,summary};
 }
@@ -709,6 +725,7 @@ function renderReport(a){
   if(Number.isFinite(s.numberCoverage) && s.numberCoverage<.995) qualityProblems.push(`レス番号 ${pct(s.numberCoverage)}（欠番${s.missingNumbers.length}件）`);
   if(s.dateCoverage<.80) qualityProblems.push(`日時 ${pct(s.dateCoverage)}`);
   if(s.idCoverage<.80) qualityProblems.push(`ID ${pct(s.idCoverage)}`);
+  if(!s.archiveTextReliable) qualityProblems.push(`本文抽出（名前 ${pct(s.nameCoverage)} / 本文あり ${pct(s.bodyCoverage)}）`);
 
   const qualityLead=qualityProblems.length
     ? `<p class="warning"><strong>抽出失敗:</strong> ${esc(qualityProblems.join(' / '))}。期間・速度・参加者集中度は表示停止しました。壊れた数値をもっともらしく断定する機能はありません。</p>`
@@ -782,10 +799,10 @@ function renderSegments(a){
 function renderData(a){
   const s=a.summary; const missingDates=s.posts-s.dated;
   const probe=state.pdfExtractionProbe;
-  const probeText=probe?`（stream ${probe.stream.unique}件・日時${probe.stream.dates} / spatial ${probe.spatial.unique}件・日時${probe.spatial.dates}）`:'';
+  const probeText=probe?`（stream ${probe.stream.unique}件・日時${probe.stream.dates}・名前${probe.stream.names}・本文${probe.stream.bodies} / spatial ${probe.spatial.unique}件・日時${probe.spatial.dates}・名前${probe.spatial.names}・本文${probe.spatial.bodies}）`:'';
   const mode=state.pdfExtractionMode?` / PDF抽出方式 <strong>${esc(state.pdfExtractionMode)}</strong>${esc(probeText)}`:'';
-  const hard=s.dateCoverage<.80||s.numberCoverage<.95;
-  $('qualityBox').innerHTML=`<h2>抽出品質 <small>v5.0</small></h2>${hard?'<p class="warning"><strong>解析停止相当:</strong> 抽出率が低すぎます。この状態の期間・速度・参加者分析を信用してはいけません。</p>':''}<p>レス番号カバー率 <strong>${pct(s.numberCoverage)}</strong> / 日時カバー率 <strong>${pct(s.dateCoverage)}</strong>（${fmt(s.dated)}/${fmt(s.posts)}件、欠損${fmt(missingDates)}件） / IDカバー率 <strong>${pct(s.idCoverage)}</strong> / 文字破損疑い率 <strong>${pct(s.replacementRate,3)}</strong>${mode}</p><p class="muted">元PDFで日時・IDが「NG」のレスは推測で補いません。v5.0はPDF.jsのストリーム順と座標行の両方を実際のレスパーサーへ通し、レス番号・日時・IDの回収結果が良い方を採用します。</p>`;
+  const hard=s.dateCoverage<.80||s.numberCoverage<.95||!s.archiveTextReliable;
+  $('qualityBox').innerHTML=`<h2>抽出品質 <small>v6.0</small></h2>${hard?'<p class="warning"><strong>解析停止相当:</strong> 抽出に欠損があります。番号と日時だけ合っていても、本文が消えていれば分析成功ではありません。</p>':''}<p>レス番号 <strong>${pct(s.numberCoverage)}</strong> / 日時 <strong>${pct(s.dateCoverage)}</strong>（${fmt(s.dated)}/${fmt(s.posts)}件、欠損${fmt(missingDates)}件） / ID <strong>${pct(s.idCoverage)}</strong> / 名前 <strong>${pct(s.nameCoverage)}</strong> / 本文あり <strong>${pct(s.bodyCoverage)}</strong> / 文字破損疑い <strong>${pct(s.replacementRate,3)}</strong>${mode}</p>${!s.archiveTextReliable?'<p class="warning"><strong>本文抽出失敗:</strong> 日本語CIDフォント用CMapの取得失敗、またはPDFテキスト層の欠損が疑われます。頻出句・コピペ・AA・名前分析は信用できません。</p>':''}<p class="muted">元PDFで日時・IDが「NG」のレスは推測で補いません。v6.0はAdobe CMapと標準フォントデータを読み込み、PDF.jsのストリーム順と座標行の両方を実際のレスパーサーへ通して比較します。</p>`;
   $('postTable').innerHTML=tableHtml(['No.','日時','ID','名前','頁','文字','返信先','本文'],a.posts.slice(0,1000).map(p=>[p.num,esc(p.date),esc(p.id),esc(p.name),esc(p.pages.join(',')),p.length,esc(p.replyTargets.join(',')),esc(p.body.replace(/\n/g,' ').slice(0,220))]));
   $('downloadCsv').onclick=()=>{const h=['num','date','id','name','pages','length','reply_targets','has_url','has_aa','is_long','body'];const lines=[h.join(',')];for(const p of a.posts)lines.push([p.num,p.date,p.id,p.name,p.pages.join('|'),p.length,p.replyTargets.join('|'),p.hasUrl,p.hasAA,p.isLong,p.body].map(csvCell).join(','));download('posts.csv','\ufeff'+lines.join('\n'),'text/csv;charset=utf-8')};
   $('downloadJson').onclick=()=>download('summary.json',JSON.stringify({sources:state.sourceNames,summary:{...s,start:s.start?.toISOString(),end:s.end?.toISOString()},top_phrases:a.phraseData.slice(0,50),top_lines:a.lineData.slice(0,50),segment_terms:a.segmentTerms,exact_duplicate_groups:a.exactGroups.slice(0,50).map(g=>({posts:g.posts.map(p=>p.num),preview:g.preview})),near_duplicates:a.nearDuplicates.slice(0,50).map(x=>({a:x.a.num,b:x.b.num,similarity:x.similarity}))},null,2),'application/json');
