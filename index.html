@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>スレ・長文テキスト分析器</title>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg:#0b1020; --panel:#151c31; --panel2:#1c2540; --text:#eef2ff;
+      --muted:#aab4d0; --line:#2b3658; --accent:#7dd3fc; --ok:#86efac; --warn:#fde68a;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans JP",sans-serif;background:var(--bg);color:var(--text)}
+    header{padding:18px 18px 8px;max-width:1400px;margin:auto}
+    h1{font-size:clamp(22px,4vw,34px);margin:0 0 8px}
+    h2{font-size:20px;margin:4px 0 12px}
+    h3{font-size:16px;margin:16px 0 8px}
+    p{line-height:1.65}
+    .muted{color:var(--muted)}
+    main{max-width:1400px;margin:auto;padding:10px 18px 60px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;margin:12px 0;box-shadow:0 8px 30px rgba(0,0,0,.18)}
+    .drop{border:2px dashed #52618d;border-radius:14px;padding:24px;text-align:center;background:linear-gradient(135deg,rgba(125,211,252,.08),rgba(134,239,172,.05));cursor:pointer}
+    .drop.drag{border-color:var(--accent);transform:scale(1.005)}
+    input[type=file]{display:none}
+    button,.btn{border:1px solid #4b5a88;background:#243052;color:white;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
+    button:hover,.btn:hover{filter:brightness(1.12)}
+    button.primary{background:#0f6b8d;border-color:#38bdf8}
+    button:disabled{opacity:.45;cursor:not-allowed}
+    textarea,input[type=text],select{width:100%;background:#0d1428;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit}
+    textarea{min-height:110px;resize:vertical}
+    .row{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
+    .col-4{grid-column:span 4}.col-6{grid-column:span 6}.col-8{grid-column:span 8}.col-12{grid-column:span 12}
+    .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+    .metric{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px}
+    .metric .value{font-size:24px;font-weight:800}.metric .label{font-size:12px;color:var(--muted);margin-top:4px}
+    .tabs{display:flex;gap:8px;overflow:auto;padding:4px 0 10px;position:sticky;top:0;z-index:4;background:linear-gradient(var(--bg) 80%,transparent)}
+    .tab{white-space:nowrap}.tab.active{background:#0f6b8d;border-color:#38bdf8}
+    .tab-pane{display:none}.tab-pane.active{display:block}
+    .chart{height:420px}.chart.small{height:330px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}
+    th{position:sticky;top:0;background:var(--panel2);z-index:1}
+    .table-wrap{overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:10px}
+    code{background:#0d1428;border:1px solid var(--line);border-radius:6px;padding:1px 5px}
+    .pill{display:inline-block;border:1px solid #4b5a88;border-radius:999px;padding:3px 8px;margin:2px;font-size:12px;background:#1c2848}
+    .status{white-space:pre-wrap;background:#0d1428;border-radius:10px;padding:10px;min-height:42px;color:var(--muted)}
+    .report{line-height:1.8}.report strong{color:var(--accent)}
+    .warning{border-left:4px solid var(--warn);padding-left:10px}.ok{border-left:4px solid var(--ok);padding-left:10px}
+    .hidden{display:none!important}
+    @media(max-width:800px){.col-4,.col-6,.col-8{grid-column:span 12}.chart{height:360px}main,header{padding-left:10px;padding-right:10px}}
+  </style>
+</head>
+<body>
+<header>
+  <h1>スレ・長文テキスト分析器</h1>
+  <div class="muted">PDF / TXT / HTMLを端末内で解析。レス速度、参加者、返信網、頻出句、コピペ、区間ごとの流行語まで一気に出します。</div>
+</header>
+<main>
+  <section class="panel">
+    <label id="dropZone" class="drop" for="fileInput">
+      <div style="font-size:20px;font-weight:800">ファイルをここに置く / タップして選択</div>
+      <div class="muted" style="margin-top:6px">PDF・TXT・HTML。複数ファイル可。解析内容は外部送信しません。</div>
+    </label>
+    <input id="fileInput" type="file" accept=".pdf,.txt,.log,.html,.htm,.md" multiple />
+    <div class="row" style="margin-top:12px">
+      <div class="col-8">
+        <label>独自カテゴリ（1行1カテゴリ、<code>名前:語1,語2</code>）</label>
+        <textarea id="categoryInput">笑い:w,ｗ,笑,草,ワロ
+質問:？,?,なぜ,どう,何,いつ,どこ
+命令・定型:しろ,せよ,なれ,見とけ,待ってろ,しゃぶれ
+批判・対立:うざ,死ね,氏ね,嫌い,批判,荒らし,クソ
+評価・称賛:神,最高,面白,すごい,乙,8.8点
+野球・競技:野球,投手,選手,メジャー,試合,ドラフト,球界
+新規・復帰:初めて,新スレ,帰って,復帰,戻って</textarea>
+      </div>
+      <div class="col-4">
+        <label>追跡キーワード（カンマ区切り）</label>
+        <textarea id="keywordInput" placeholder="例: TDN,TNOK,撲滅,しゃぶれよ"></textarea>
+        <button id="analyzeBtn" class="primary" style="width:100%;margin-top:8px" disabled>解析する</button>
+      </div>
+    </div>
+    <div id="status" class="status" style="margin-top:12px">ファイル待ち。</div>
+  </section>
+
+  <section id="results" class="hidden">
+    <div class="tabs">
+      <button class="tab active" data-tab="overview">全体</button>
+      <button class="tab" data-tab="timeline">時系列</button>
+      <button class="tab" data-tab="phrases">頻出句</button>
+      <button class="tab" data-tab="participants">参加者</button>
+      <button class="tab" data-tab="replies">返信</button>
+      <button class="tab" data-tab="repetition">コピペ</button>
+      <button class="tab" data-tab="segments">区間変化</button>
+      <button class="tab" data-tab="data">データ</button>
+    </div>
+
+    <div id="overview" class="tab-pane active">
+      <div id="metrics" class="metrics"></div>
+      <div class="panel"><h2>自動所見</h2><div id="autoReport" class="report"></div></div>
+      <div class="row">
+        <div class="col-6 panel"><h2>レス数推移</h2><div id="overviewTimeline" class="chart small"></div></div>
+        <div class="col-6 panel"><h2>カテゴリ比率</h2><div id="categoryPie" class="chart small"></div></div>
+      </div>
+    </div>
+
+    <div id="timeline" class="tab-pane">
+      <div class="panel"><h2>投稿数と累積</h2><div id="timelineChart" class="chart"></div></div>
+      <div class="row">
+        <div class="col-6 panel"><h2>時間帯別</h2><div id="hourChart" class="chart small"></div></div>
+        <div class="col-6 panel"><h2>区間別の平均レス長</h2><div id="lengthSegmentChart" class="chart small"></div></div>
+      </div>
+      <div class="panel"><h2>カテゴリの推移</h2><div id="categoryTrendChart" class="chart"></div></div>
+    </div>
+
+    <div id="phrases" class="tab-pane">
+      <div class="row">
+        <div class="col-6 panel"><h2>頻出フレーズ</h2><div id="phraseTable" class="table-wrap"></div></div>
+        <div class="col-6 panel"><h2>頻出行</h2><div id="lineTable" class="table-wrap"></div></div>
+      </div>
+      <div class="panel"><h2>追跡キーワード推移</h2><div id="keywordChart" class="chart"></div><div id="keywordEmpty" class="muted"></div></div>
+    </div>
+
+    <div id="participants" class="tab-pane">
+      <div class="row">
+        <div class="col-6 panel"><h2>ID別投稿数</h2><div id="idChart" class="chart"></div></div>
+        <div class="col-6 panel"><h2>名前別投稿数</h2><div id="nameChart" class="chart"></div></div>
+      </div>
+      <div class="panel"><h2>IDの活動期間</h2><div id="participantTable" class="table-wrap"></div></div>
+    </div>
+
+    <div id="replies" class="tab-pane">
+      <div class="row">
+        <div class="col-5 panel"><h2>参照されたレス</h2><div id="replyTargetTable" class="table-wrap"></div></div>
+        <div class="col-7 panel"><h2>返信ネットワーク（上位ID）</h2><div id="replyNetwork" class="chart"></div></div>
+      </div>
+    </div>
+
+    <div id="repetition" class="tab-pane">
+      <div class="row">
+        <div class="col-6 panel"><h2>完全一致の重複</h2><div id="duplicateTable" class="table-wrap"></div></div>
+        <div class="col-6 panel"><h2>類似コピペ候補</h2><div id="nearDuplicateTable" class="table-wrap"></div></div>
+      </div>
+    </div>
+
+    <div id="segments" class="tab-pane">
+      <div class="panel"><h2>10区間ごとの特徴語</h2><div id="segmentTerms"></div></div>
+      <div class="panel"><h2>区間別カテゴリ比率</h2><div id="segmentCategoryChart" class="chart"></div></div>
+    </div>
+
+    <div id="data" class="tab-pane">
+      <div class="panel">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <button id="downloadCsv">posts.csv</button>
+          <button id="downloadJson">summary.json</button>
+        </div>
+        <div id="qualityBox"></div>
+      </div>
+      <div class="panel"><h2>抽出レス確認</h2><div id="postTable" class="table-wrap"></div></div>
+    </div>
+  </section>
+</main>
+
+<script>
+'use strict';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+const $ = (id) => document.getElementById(id);
+const state = { files: [], pages: [], posts: [], analysis: null, sourceNames: [] };
+const plotConfig = {responsive:true, displaylogo:false, modeBarButtonsToRemove:['lasso2d','select2d']};
+const layoutBase = {paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)', font:{color:'#dbe7ff'}, margin:{l:55,r:20,t:20,b:55}, xaxis:{gridcolor:'#2b3658'}, yaxis:{gridcolor:'#2b3658'}};
+
+function setStatus(text){ $('status').textContent = text; }
+function esc(s){ return String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function fmt(n,d=0){ return Number.isFinite(n) ? n.toLocaleString('ja-JP',{maximumFractionDigits:d}) : '-'; }
+function pct(n,d=1){ return Number.isFinite(n) ? (n*100).toFixed(d)+'%' : '-'; }
+function clamp(x,a,b){ return Math.max(a,Math.min(b,x)); }
+function median(a){ if(!a.length)return NaN; const b=[...a].sort((x,y)=>x-y),m=Math.floor(b.length/2); return b.length%2?b[m]:(b[m-1]+b[m])/2; }
+function quantile(a,q){ if(!a.length)return NaN; const b=[...a].sort((x,y)=>x-y),p=(b.length-1)*q,i=Math.floor(p),f=p-i; return b[i]+(b[Math.min(i+1,b.length-1)]-b[i])*f; }
+function durationText(ms){
+  if(!Number.isFinite(ms)||ms<0)return '不明';
+  const sec=Math.round(ms/1000), d=Math.floor(sec/86400), h=Math.floor(sec%86400/3600), m=Math.floor(sec%3600/60), s=sec%60;
+  if(d)return `${d}日${h}時間`; if(h)return `${h}時間${m}分`; if(m)return `${m}分${s}秒`; return `${s}秒`;
+}
+function download(name,text,type='text/plain;charset=utf-8'){
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([text],{type})); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+function csvCell(v){ const s=String(v??''); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }
+
+$('fileInput').addEventListener('change', e => loadFiles([...e.target.files]));
+const dz=$('dropZone');
+['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag')}));
+['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag')}));
+dz.addEventListener('drop',e=>loadFiles([...e.dataTransfer.files]));
+$('analyzeBtn').addEventListener('click', analyzeAll);
+
+document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(x=>x.classList.remove('active'));
+  btn.classList.add('active'); $(btn.dataset.tab).classList.add('active');
+  setTimeout(()=>window.dispatchEvent(new Event('resize')),50);
+}));
+
+async function loadFiles(files){
+  if(!files.length)return;
+  state.files=files; state.pages=[]; state.sourceNames=files.map(f=>f.name);
+  $('analyzeBtn').disabled=true;
+  setStatus(`読み込み開始: ${files.map(f=>f.name).join(', ')}`);
+  try{
+    for(let fi=0;fi<files.length;fi++){
+      const file=files[fi];
+      if(file.name.toLowerCase().endsWith('.pdf')){
+        const pages=await extractPdf(file,fi,files.length);
+        state.pages.push(...pages.map((text,i)=>({text,page:i+1,source:file.name})));
+      }else{
+        let text=await file.text();
+        if(/\.html?$/i.test(file.name)){
+          const doc=new DOMParser().parseFromString(text,'text/html');
+          text=doc.body?.innerText || doc.documentElement.textContent || text;
+        }
+        state.pages.push({text,page:1,source:file.name});
+      }
+    }
+    $('analyzeBtn').disabled=false;
+    setStatus(`読み込み完了: ${state.pages.length}ページ相当。［解析する］を押してください。`);
+  }catch(err){ console.error(err); setStatus('読み込み失敗: '+err.message); }
+}
+
+async function extractPdf(file,fi,total){
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise; const pages=[];
+  for(let i=1;i<=pdf.numPages;i++){
+    setStatus(`PDF抽出中: ${file.name} ${i}/${pdf.numPages}ページ（${fi+1}/${total}ファイル）`);
+    const page=await pdf.getPage(i); const content=await page.getTextContent({normalizeWhitespace:false});
+    const rows=[];
+    for(const item of content.items){
+      const x=item.transform?.[4] ?? 0, y=item.transform?.[5] ?? 0, size=Math.abs(item.transform?.[0] ?? 10);
+      let row=rows.find(r=>Math.abs(r.y-y)<=2.5);
+      if(!row){row={y,items:[]};rows.push(row)}
+      row.items.push({x,size,str:item.str});
+    }
+    rows.sort((a,b)=>b.y-a.y);
+    const lines=rows.map(r=>{
+      r.items.sort((a,b)=>a.x-b.x); let line='',right=-Infinity;
+      for(const it of r.items){
+        const gap=it.x-right; if(line && gap>Math.max(4,it.size*.55))line+=' ';
+        line+=it.str; right=it.x+Math.max(it.size*.5,it.str.length*it.size*.45);
+      }
+      return line.trimEnd();
+    });
+    pages.push(lines.join('\n').replace(/\u0000/g,''));
+    if(i%8===0) await new Promise(r=>setTimeout(r,0));
+  }
+  return pages;
+}
+
+function normalizeText(s){
+  return String(s??'').normalize('NFKC')
+    .replace(/https?:\/\/\S+|ttp:\/\/\S+/gi,' ')
+    .replace(/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}(?:\([^)]*\))?\s*\d{1,2}:\d{2}:\d{2}/g,' ')
+    .replace(/\b\d{1,2}:\d{2}:\d{2}\b/g,' ').replace(/\bID:[^\s]+/gi,' ')
+    .replace(/>>\s*[0-9０-９,，\-ー–—]+/g,' ')
+    .replace(/[\s\u3000]+/g,' ').replace(/[「」『』【】〈〉《》\[\]（）()…・、。!！?？:：;；“”"'`~〜～＿_\-—=＝+＋*＊\/\\|｜<>＜＞]/g,'').trim().toLowerCase();
+}
+function parseDate(s){
+  let m=String(s).match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:\([^)]*\))?\s+(\d{1,2}):(\d{2}):(\d{2})/);
+  if(!m)return null; const d=new Date(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]); return Number.isNaN(+d)?null:d;
+}
+function extractReplyTargets(text){
+  const out=[]; const re=/>>\s*([0-9０-９]{1,4})(?:\s*[-ー–—]\s*([0-9０-９]{1,4}))?/g; let m;
+  while((m=re.exec(text))){ const a=+m[1].normalize('NFKC'), b=m[2]?+m[2].normalize('NFKC'):a; for(let n=a;n<=Math.min(b,a+50);n++)out.push(n); }
+  return [...new Set(out)];
+}
+function aaScore(text){
+  if(!text)return 0; const sym=(text.match(/[＿￣|｜│┃┌┐└┘╋━┏┓┗┛┳┻┫┣／＼\/<>{}\[\]=~^_]/g)||[]).length;
+  const aligned=(text.match(/^.{0,6}[\s　]{5,}.+$/gm)||[]).length; return sym/Math.max(1,text.length)+aligned*0.03;
+}
+function parseCategoryInput(){
+  const groups=[];
+  for(const line of $('categoryInput').value.split(/\n/)){
+    const i=line.indexOf(':'); if(i<1)continue;
+    const name=line.slice(0,i).trim(), words=line.slice(i+1).split(/[,，]/).map(x=>x.trim()).filter(Boolean);
+    if(name&&words.length)groups.push({name,words});
+  }
+  return groups;
+}
+
+function parseAllPages(pages){
+  const joined=pages.map(p=>p.text).join('\n');
+  const markerCount=(joined.match(/^\s*▾\s*\d{1,4}\s*$/gm)||[]).length;
+  let posts;
+  if(markerCount>=5) posts=parseArchivePages(pages);
+  else {
+    posts=parseDatStyle(joined,pages[0]?.source||'text');
+    if(posts.length<5) posts=parseFallback(joined,pages[0]?.source||'text');
+  }
+  const groups=parseCategoryInput();
+  for(const p of posts){
+    p.body=p.body.trim(); p.dateObj=p.date?parseDate(p.date):null; p.length=[...p.body].length; p.lines=p.body?p.body.split(/\n/).length:0;
+    p.normalized=normalizeText(p.body); p.replyTargets=extractReplyTargets(p.body); p.hasUrl=/(?:https?:\/\/|ttp:\/\/|www\.)/i.test(p.body);
+    p.aaScore=aaScore(p.body); p.hasAA=p.aaScore>=0.10; p.isLong=p.length>=500 || p.lines>=12;
+    p.categories={}; const low=p.body.normalize('NFKC').toLowerCase();
+    for(const g of groups) p.categories[g.name]=g.words.some(w=>low.includes(w.normalize('NFKC').toLowerCase()));
+  }
+  return posts.sort((a,b)=>(a.num??1e9)-(b.num??1e9));
+}
+
+function parseArchivePages(pages){
+  const posts=[]; let previous=null;
+  const dateRe=/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}(?:\([^)]*\))?\s+\d{1,2}:\d{2}:\d{2}/;
+
+  for(const pg of pages){
+    const raw=pg.text.replace(/\r/g,'');
+    const ids=[...raw.matchAll(/ID:([^\s]+)/g)].map(m=>m[1]);
+    let idCursor=0;
+    const text=raw.replace(/\s*ID:[^\s]+/g,'');
+    const markerRe=/^\s*▾\s*(\d{1,4})\s*$/gm;
+    const matches=[...text.matchAll(markerRe)];
+    const prefix=matches.length?text.slice(0,matches[0].index):text;
+
+    // レス見出しだけが前ページ末尾にあり、日時・本文が次ページへ送られた場合を回収する。
+    if(previous && prefix.trim() && !/^\s*(?:トップページ|Thread)\b/.test(prefix.trim())){
+      const lines=prefix.trim().split(/\n/).map(x=>x.trimEnd());
+      let contentStart=0;
+
+      if(!previous.date){
+        for(let j=0;j<Math.min(12,lines.length);j++){
+          const dm=lines[j].match(dateRe);
+          if(dm){
+            previous.date=dm[0];
+            contentStart=j+1;
+            if(!previous.id && ids[idCursor]) previous.id=ids[idCursor++];
+            break;
+          }
+          if(lines[j].trim()==='NG'){
+            contentStart=j+1;
+            break;
+          }
+        }
+      }
+
+      const continuation=lines.slice(contentStart).join('\n').trim();
+      if(continuation) previous.body += '\n'+continuation;
+      if(!previous.pages.includes(pg.page)) previous.pages.push(pg.page);
+    }
+
+    const pagePosts=[];
+    for(let i=0;i<matches.length;i++){
+      const m=matches[i], start=m.index+m[0].length, end=i+1<matches.length?matches[i+1].index:text.length;
+      const lines=text.slice(start,end).trim().split(/\n/).map(x=>x.trimEnd());
+      const num=+m[1], name=(lines.shift()||'').trim(); let date='', dateIdx=-1;
+      for(let j=0;j<Math.min(12,lines.length);j++){
+        const dm=lines[j].match(dateRe);
+        if(dm){date=dm[0];dateIdx=j;break;}
+        if(lines[j].trim()==='NG'){dateIdx=j;break;}
+      }
+      const body=lines.slice(dateIdx>=0?dateIdx+1:0).join('\n').trim();
+      const p={num,name,date,id:'',body,pages:[pg.page],source:pg.source};
+      posts.push(p); pagePosts.push(p); previous=p;
+    }
+
+    const assignable=pagePosts.filter(p=>p.date);
+    for(let i=0;i<assignable.length && idCursor<ids.length;i++,idCursor++){
+      assignable[i].id=ids[idCursor];
+    }
+  }
+  return posts;
+}
+
+function parseDatStyle(text,source){
+  const re=/^(\d{1,4})\s*[：:]\s*([^\n：:]*?)[：:]\s*(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}(?:\([^)]*\))?\s+\d{1,2}:\d{2}:\d{2})(?:\s+ID:([^\s]+))?.*$/gm;
+  const ms=[...text.matchAll(re)], posts=[];
+  for(let i=0;i<ms.length;i++){
+    const end=i+1<ms.length?ms[i+1].index:text.length;
+    posts.push({num:+ms[i][1],name:ms[i][2].trim(),date:ms[i][3],id:ms[i][4]||'',body:text.slice(ms[i].index+ms[i][0].length,end).trim(),pages:[1],source});
+  }
+  return posts;
+}
+function parseFallback(text,source){
+  const blocks=text.replace(/\r/g,'').split(/\n{2,}/).map(x=>x.trim()).filter(Boolean);
+  return blocks.map((body,i)=>({num:i+1,name:'',date:'',id:'',body,pages:[1],source}));
+}
+
+async function analyzeAll(){
+  if(!state.pages.length)return;
+  try{
+    $('analyzeBtn').disabled=true; setStatus('レス構造を解析中…'); await tick();
+    const posts=parseAllPages(state.pages).filter(p=>p.body || p.name);
+    state.posts=posts; setStatus(`抽出完了: ${posts.length}レス。統計を計算中…`); await tick();
+    state.analysis=computeAnalysis(posts); setStatus('グラフを描画中…'); await tick();
+    renderAll(state.analysis); $('results').classList.remove('hidden'); setStatus(`完了: ${posts.length}レスを解析しました。`);
+  }catch(err){ console.error(err); setStatus('解析失敗: '+err.message); }
+  finally{$('analyzeBtn').disabled=false;}
+}
+function tick(){return new Promise(r=>setTimeout(r,0));}
+
+function computeAnalysis(posts){
+  const valid=posts.filter(p=>p.num!==1001 && p.name!=='１００１');
+  const dated=valid.filter(p=>p.dateObj).sort((a,b)=>a.dateObj-b.dateObj);
+  const times=dated.map(p=>+p.dateObj), start=times.length?Math.min(...times):NaN, end=times.length?Math.max(...times):NaN, duration=end-start;
+  const gaps=[]; for(let i=1;i<times.length;i++)if(times[i]>=times[i-1])gaps.push((times[i]-times[i-1])/1000);
+  const idCounts=countBy(valid.filter(p=>p.id),p=>p.id), nameCounts=countBy(valid.filter(p=>p.name),p=>p.name);
+  const exactGroups=groupExactDuplicates(valid); const duplicatePosts=exactGroups.reduce((s,g)=>s+g.posts.length,0);
+  const categories=parseCategoryInput();
+  const catCounts=Object.fromEntries(categories.map(g=>[g.name,valid.filter(p=>p.categories[g.name]).length]));
+  const replyLinks=[]; const byNum=new Map(valid.map(p=>[p.num,p]));
+  for(const p of valid)for(const t of p.replyTargets){const target=byNum.get(t);replyLinks.push({source:p,target,num:t});}
+  const targetCounts=new Map(); for(const e of replyLinks)targetCounts.set(e.num,(targetCounts.get(e.num)||0)+1);
+  const interval=chooseInterval(duration); const timeline=makeTimeline(dated,start,end,interval);
+  const segments=makeSegments(valid,10); const phraseData=extractPhrases(valid); const lineData=extractLines(valid);
+  const nearDuplicates=findNearDuplicates(valid); const segmentTerms=distinctiveTerms(segments,valid);
+  const keywords=$('keywordInput').value.split(/[,，\n]/).map(x=>x.trim()).filter(Boolean);
+  const keywordTrend=keywords.map(k=>({keyword:k,values:segments.map(s=>s.posts.filter(p=>p.body.normalize('NFKC').toLowerCase().includes(k.normalize('NFKC').toLowerCase())).length)}));
+  const giniId=gini([...idCounts.values()]);
+  const summary={
+    posts:valid.length,dated:dated.length,ids:idCounts.size,names:nameCounts.size,start:Number.isFinite(start)?new Date(start):null,end:Number.isFinite(end)?new Date(end):null,duration,
+    postsPerHour:duration>0?valid.length/(duration/3600000):NaN,medianGap:median(gaps),p90Gap:quantile(gaps,.9),replyRate:valid.filter(p=>p.replyTargets.length).length/Math.max(1,valid.length),
+    urlRate:valid.filter(p=>p.hasUrl).length/Math.max(1,valid.length),aaRate:valid.filter(p=>p.hasAA).length/Math.max(1,valid.length),longRate:valid.filter(p=>p.isLong).length/Math.max(1,valid.length),
+    duplicateRate:duplicatePosts/Math.max(1,valid.length),giniId,dateCoverage:dated.length/Math.max(1,valid.length),idCoverage:valid.filter(p=>p.id).length/Math.max(1,valid.length),
+    replacementRate:(valid.reduce((s,p)=>s+(p.body.match(/�/g)||[]).length,0))/Math.max(1,valid.reduce((s,p)=>s+p.length,0))
+  };
+  return {posts:valid,dated,idCounts,nameCounts,exactGroups,nearDuplicates,categories,catCounts,replyLinks,targetCounts,byNum,timeline,interval,segments,phraseData,lineData,segmentTerms,keywordTrend,summary};
+}
+
+function countBy(items,keyFn){const m=new Map();for(const x of items){const k=keyFn(x);m.set(k,(m.get(k)||0)+1)}return m;}
+function gini(values){ if(!values.length)return NaN; const a=[...values].sort((x,y)=>x-y),sum=a.reduce((s,x)=>s+x,0); if(!sum)return 0; let acc=0; for(let i=0;i<a.length;i++)acc+=(i+1)*a[i]; return 2*acc/(a.length*sum)-(a.length+1)/a.length; }
+function chooseInterval(duration){ if(!Number.isFinite(duration)||duration<=0)return 3600000; if(duration<=6*3600000)return 10*60000; if(duration<=3*86400000)return 3600000; if(duration<=45*86400000)return 86400000; return 7*86400000; }
+function makeTimeline(dated,start,end,interval){
+  if(!dated.length)return [];
+  const base=Math.floor(start/interval)*interval, n=Math.max(1,Math.floor((end-base)/interval)+1), bins=Array.from({length:n},(_,i)=>({time:new Date(base+i*interval),count:0,lengths:[],posts:[]}));
+  for(const p of dated){const i=clamp(Math.floor((+p.dateObj-base)/interval),0,n-1);bins[i].count++;bins[i].lengths.push(p.length);bins[i].posts.push(p)}
+  let cum=0; for(const b of bins){cum+=b.count;b.cumulative=cum;b.meanLength=b.lengths.length?b.lengths.reduce((s,x)=>s+x,0)/b.lengths.length:0} return bins;
+}
+function makeSegments(posts,n){
+  return Array.from({length:n},(_,i)=>{const a=Math.floor(posts.length*i/n),b=Math.floor(posts.length*(i+1)/n);return {index:i+1,start:a+1,end:b,posts:posts.slice(a,b)}});
+}
+
+function groupExactDuplicates(posts){
+  const m=new Map(); for(const p of posts){if(p.normalized.length<3)continue; if(!m.has(p.normalized))m.set(p.normalized,[]);m.get(p.normalized).push(p)}
+  return [...m.entries()].filter(([,ps])=>ps.length>=2).map(([key,ps])=>({key,posts:ps,preview:ps[0].body.slice(0,180)})).sort((a,b)=>b.posts.length-a.posts.length||b.key.length-a.key.length).slice(0,100);
+}
+function extractLines(posts){
+  const m=new Map();
+  for(const p of posts){const seen=new Set();for(let line of p.body.split(/\n/)){line=line.trim();const n=normalizeText(line);if(n.length<3||n.length>120||seen.has(n))continue;seen.add(n);const o=m.get(n)||{count:0,text:line,posts:[]};o.count++;if(o.posts.length<8)o.posts.push(p.num);m.set(n,o)}}
+  return [...m.values()].filter(x=>x.count>=2).sort((a,b)=>b.count-a.count||b.text.length-a.text.length).slice(0,200);
+}
+function extractPhrases(posts){
+  const df=new Map(), example=new Map();
+  for(const p of posts){
+    const s=normalizeText(p.body).slice(0,350); const seen=new Set();
+    for(let n=3;n<=9;n++)for(let i=0;i+n<=s.length;i++){
+      const g=s.slice(i,i+n); if(/^[0-9]+$/.test(g)||/[\s]/.test(g)||g.length<3)continue; seen.add(g);
+    }
+    for(const g of seen){df.set(g,(df.get(g)||0)+1);if(!example.has(g))example.set(g,p.num)}
+  }
+  let arr=[...df.entries()].filter(([,c])=>c>=3).map(([text,count])=>({text,count,score:count*Math.pow(text.length,1.25),example:example.get(text)})).sort((a,b)=>b.score-a.score);
+  const kept=[];
+  for(const x of arr){if(kept.some(y=>y.text.includes(x.text)&&y.count>=x.count*.82))continue;kept.push(x);if(kept.length>=150)break;}
+  return kept;
+}
+
+function hash64(str){let h=1469598103934665603n;for(const ch of str){h^=BigInt(ch.codePointAt(0));h=BigInt.asUintN(64,h*1099511628211n)}return h;}
+function shingles(s,n=3){const t=normalizeText(s).slice(0,1200),set=new Set();for(let i=0;i+n<=t.length;i++)set.add(t.slice(i,i+n));return set;}
+function simhash(text){
+  const sh=shingles(text),v=new Int32Array(64); for(const token of sh){const h=hash64(token);for(let i=0n;i<64n;i++)v[Number(i)]+=((h>>i)&1n)?1:-1;}
+  let out=0n;for(let i=0n;i<64n;i++)if(v[Number(i)]>=0)out|=1n<<i;return out;
+}
+function hamming(a,b){let x=a^b,c=0;while(x){x&=x-1n;c++}return c;}
+function jaccard(a,b){let inter=0;for(const x of a)if(b.has(x))inter++;return inter/(a.size+b.size-inter||1);}
+function findNearDuplicates(posts){
+  const items=posts.filter(p=>p.normalized.length>=40).map(p=>({p,hash:simhash(p.body),sh:null})); const buckets=new Map(), candidates=new Set();
+  for(let i=0;i<items.length;i++)for(let band=0;band<4;band++){
+    const key=band+':'+Number((items[i].hash>>BigInt(band*16))&65535n); const arr=buckets.get(key)||[];
+    for(const j of arr)candidates.add(j<i?j+','+i:i+','+j); arr.push(i); buckets.set(key,arr);
+  }
+  const out=[]; let checked=0;
+  for(const key of candidates){const [i,j]=key.split(',').map(Number),a=items[i],b=items[j];const lr=Math.min(a.p.length,b.p.length)/Math.max(a.p.length,b.p.length);if(lr<.55)continue;const hd=hamming(a.hash,b.hash);if(hd>16)continue;
+    a.sh ||= shingles(a.p.body); b.sh ||= shingles(b.p.body); const sim=jaccard(a.sh,b.sh);checked++; if(sim>=.50 && a.p.normalized!==b.p.normalized)out.push({a:a.p,b:b.p,similarity:sim,hamming:hd});
+    if(checked>25000)break;
+  }
+  return out.sort((x,y)=>y.similarity-x.similarity).slice(0,100);
+}
+
+function distinctiveTerms(segments,allPosts){
+  const global=new Map(); const local=[];
+  function grams(p){const s=normalizeText(p.body).slice(0,260),set=new Set();for(let n=3;n<=7;n++)for(let i=0;i+n<=s.length;i++){const g=s.slice(i,i+n);if(!/^\d+$/.test(g))set.add(g)}return set;}
+  const caches=new Map();
+  for(const p of allPosts){const gs=grams(p);caches.set(p,gs);for(const g of gs)global.set(g,(global.get(g)||0)+1)}
+  for(const seg of segments){const m=new Map();for(const p of seg.posts)for(const g of caches.get(p))m.set(g,(m.get(g)||0)+1);
+    let arr=[...m.entries()].filter(([,c])=>c>=2).map(([text,count])=>({text,count,score:(count/Math.max(1,seg.posts.length))*Math.log((allPosts.length+1)/((global.get(text)||0)+1))*Math.pow(text.length,0.6)})).sort((a,b)=>b.score-a.score);
+    const keep=[];for(const x of arr){if(keep.some(y=>y.text.includes(x.text)&&y.count>=x.count*.8))continue;keep.push(x);if(keep.length>=12)break;}local.push(keep);
+  }
+  return local;
+}
+
+function renderAll(a){
+  renderMetrics(a.summary); renderReport(a); renderTimelines(a); renderCategories(a); renderPhrases(a); renderParticipants(a); renderReplies(a); renderRepetition(a); renderSegments(a); renderData(a);
+}
+function renderMetrics(s){
+  const items=[['レス数',fmt(s.posts)],['期間',durationText(s.duration)],['平均速度',fmt(s.postsPerHour,1)+' /時'],['ID数',fmt(s.ids)],['返信付き',pct(s.replyRate)],['長文率',pct(s.longRate)],['AA率',pct(s.aaRate)],['重複関与',pct(s.duplicateRate)]];
+  $('metrics').innerHTML=items.map(([l,v])=>`<div class="metric"><div class="value">${esc(v)}</div><div class="label">${esc(l)}</div></div>`).join('');
+}
+function renderReport(a){
+  const s=a.summary, peak=a.timeline.reduce((best,x)=>!best||x.count>best.count?x:best,null), topId=[...a.idCounts].sort((x,y)=>y[1]-x[1])[0], topPhrase=a.phraseData[0], topTarget=[...a.targetCounts].sort((x,y)=>y[1]-x[1])[0];
+  const early=a.segmentTerms[0]?.slice(0,5).map(x=>x.text).join('・')||'抽出不足', late=a.segmentTerms.at(-1)?.slice(0,5).map(x=>x.text).join('・')||'抽出不足';
+  let concentration=Number.isFinite(s.giniId)?(s.giniId<.25?'分散型':s.giniId<.5?'中程度に集中':'少数ID集中型'):'不明';
+  $('autoReport').innerHTML=`
+    <p>全体は <strong>${fmt(s.posts)}レス</strong>、日時を読めた範囲では <strong>${esc(durationText(s.duration))}</strong>。平均速度は <strong>${fmt(s.postsPerHour,1)}レス/時</strong>、投稿間隔の中央値は <strong>${fmt(s.medianGap,0)}秒</strong>です。</p>
+    <p>${peak?`最大の山は <strong>${esc(peak.time.toLocaleString('ja-JP'))}</strong> の区間で <strong>${fmt(peak.count)}レス</strong>。`:''}参加者構造は <strong>${concentration}</strong>${topId?`で、最多IDは <code>${esc(topId[0])}</code>（${fmt(topId[1])}レス）`:''}です。</p>
+    <p>返信参照を含むレスは <strong>${pct(s.replyRate)}</strong>${topTarget?`。もっとも参照されたのは <strong>&gt;&gt;${topTarget[0]}</strong>（${topTarget[1]}回）`:''}です。完全一致の重複群は <strong>${fmt(a.exactGroups.length)}群</strong>、類似コピペ候補は <strong>${fmt(a.nearDuplicates.length)}組</strong>。</p>
+    <p>${topPhrase?`頻出句の上位は <code>${esc(topPhrase.text)}</code>（${topPhrase.count}レス）です。`:''}区間特徴語は、序盤が <span class="pill">${esc(early)}</span>、終盤が <span class="pill">${esc(late)}</span>。ここは勝手な物語化ではなく、各区間で相対的に強い文字列をそのまま表示しています。</p>
+    <p class="${s.dateCoverage>.8?'ok':'warning'}">抽出品質: 日時 ${pct(s.dateCoverage)} / ID ${pct(s.idCoverage)} / 文字化け記号率 ${pct(s.replacementRate,3)}。PDFの段組みによってID順が崩れる場合があるため、［データ］タブで先頭・末尾を確認してください。</p>`;
+}
+function renderTimelines(a){
+  const x=a.timeline.map(b=>b.time), y=a.timeline.map(b=>b.count), cum=a.timeline.map(b=>b.cumulative);
+  Plotly.newPlot('overviewTimeline',[{x,y,type:'bar',name:'レス数'}],{...layoutBase,margin:{l:45,r:15,t:10,b:45}},plotConfig);
+  Plotly.newPlot('timelineChart',[{x,y,type:'bar',name:'区間レス数',yaxis:'y1'},{x,y:cum,type:'scatter',mode:'lines',name:'累積',yaxis:'y2'}],{...layoutBase,yaxis:{gridcolor:'#2b3658',title:'レス数'},yaxis2:{overlaying:'y',side:'right',title:'累積',showgrid:false},legend:{orientation:'h'}},plotConfig);
+  const byHour=Array(24).fill(0);for(const p of a.dated)byHour[p.dateObj.getHours()]++;
+  Plotly.newPlot('hourChart',[{x:[...Array(24).keys()],y:byHour,type:'bar'}],{...layoutBase,xaxis:{title:'時',dtick:1,gridcolor:'#2b3658'},yaxis:{title:'レス数',gridcolor:'#2b3658'}},plotConfig);
+  const means=a.segments.map(s=>s.posts.reduce((z,p)=>z+p.length,0)/Math.max(1,s.posts.length));
+  Plotly.newPlot('lengthSegmentChart',[{x:a.segments.map(s=>'区間'+s.index),y:means,type:'scatter',mode:'lines+markers'}],{...layoutBase,yaxis:{title:'平均文字数',gridcolor:'#2b3658'}},plotConfig);
+}
+function renderCategories(a){
+  const labels=a.categories.map(g=>g.name), vals=labels.map(k=>a.catCounts[k]);
+  Plotly.newPlot('categoryPie',[{labels,values:vals,type:'pie',hole:.4,textinfo:'label+percent'}],{...layoutBase,showlegend:false,margin:{l:10,r:10,t:10,b:10}},plotConfig);
+  const traces=labels.map(k=>({x:a.timeline.map(b=>b.time),y:a.timeline.map(b=>b.posts.filter(p=>p.categories[k]).length),type:'scatter',mode:'lines',name:k}));
+  Plotly.newPlot('categoryTrendChart',traces,{...layoutBase,legend:{orientation:'h'}},plotConfig);
+  const segTraces=labels.map(k=>({x:a.segments.map(s=>'区間'+s.index),y:a.segments.map(s=>s.posts.filter(p=>p.categories[k]).length/Math.max(1,s.posts.length)),type:'bar',name:k}));
+  Plotly.newPlot('segmentCategoryChart',segTraces,{...layoutBase,barmode:'group',yaxis:{tickformat:'.0%',gridcolor:'#2b3658'},legend:{orientation:'h'}},plotConfig);
+}
+function tableHtml(headers,rows){return `<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`;}
+function renderPhrases(a){
+  $('phraseTable').innerHTML=tableHtml(['順位','フレーズ','出現レス数','例'],a.phraseData.slice(0,80).map((x,i)=>[i+1,`<code>${esc(x.text)}</code>`,x.count,`&gt;&gt;${x.example}`]));
+  $('lineTable').innerHTML=tableHtml(['順位','行','レス数','例'],a.lineData.slice(0,80).map((x,i)=>[i+1,esc(x.text.slice(0,180)),x.count,x.posts.map(n=>'&gt;&gt;'+n).join(' ')]));
+  if(!a.keywordTrend.length){$('keywordChart').innerHTML='';$('keywordEmpty').textContent='追跡キーワードが未入力です。入力して再解析してください。';}
+  else{$('keywordEmpty').textContent='';Plotly.newPlot('keywordChart',a.keywordTrend.map(x=>({x:a.segments.map(s=>'区間'+s.index),y:x.values,type:'scatter',mode:'lines+markers',name:x.keyword})),{...layoutBase,legend:{orientation:'h'}},plotConfig);}
+}
+function renderParticipants(a){
+  const topIds=[...a.idCounts].sort((x,y)=>y[1]-x[1]).slice(0,30).reverse();
+  Plotly.newPlot('idChart',[{x:topIds.map(x=>x[1]),y:topIds.map(x=>x[0]),type:'bar',orientation:'h'}],{...layoutBase,margin:{l:120,r:20,t:10,b:45}},plotConfig);
+  const topNames=[...a.nameCounts].sort((x,y)=>y[1]-x[1]).slice(0,25).reverse();
+  Plotly.newPlot('nameChart',[{x:topNames.map(x=>x[1]),y:topNames.map(x=>x[0]),type:'bar',orientation:'h'}],{...layoutBase,margin:{l:160,r:20,t:10,b:45}},plotConfig);
+  const byId=new Map();for(const p of a.posts.filter(p=>p.id)){const o=byId.get(p.id)||[];o.push(p);byId.set(p.id,o)}
+  const rows=[...byId].map(([id,ps])=>{const ds=ps.filter(p=>p.dateObj).sort((x,y)=>x.dateObj-y.dateObj);return {id,count:ps.length,first:ds[0]?.dateObj,last:ds.at(-1)?.dateObj,avg:ps.reduce((s,p)=>s+p.length,0)/ps.length,replies:ps.filter(p=>p.replyTargets.length).length}}).sort((x,y)=>y.count-x.count).slice(0,150);
+  $('participantTable').innerHTML=tableHtml(['ID','レス数','初出','最終','活動幅','平均文字','返信付き'],rows.map(x=>[esc(x.id),x.count,esc(x.first?.toLocaleString('ja-JP')||'-'),esc(x.last?.toLocaleString('ja-JP')||'-'),esc(x.first&&x.last?durationText(x.last-x.first):'-'),fmt(x.avg,1),x.replies]));
+}
+function renderReplies(a){
+  const rows=[...a.targetCounts].sort((x,y)=>y[1]-x[1]).slice(0,100).map(([n,c])=>{const p=a.byNum.get(n);return [`&gt;&gt;${n}`,c,esc(p?.name||''),esc((p?.body||'').replace(/\n/g,' ').slice(0,120))]});
+  $('replyTargetTable').innerHTML=tableHtml(['レス','参照数','名前','本文'],rows);
+  renderReplyNetwork(a);
+}
+function renderReplyNetwork(a){
+  const edgeCounts=new Map(), nodeCount=new Map();
+  for(const e of a.replyLinks){const s=e.source.id||e.source.name||'不明',t=e.target?.id||e.target?.name;if(!t||s===t)continue;const k=s+'\u0000'+t;edgeCounts.set(k,(edgeCounts.get(k)||0)+1);nodeCount.set(s,(nodeCount.get(s)||0)+1);nodeCount.set(t,(nodeCount.get(t)||0)+1)}
+  const nodes=[...nodeCount].sort((x,y)=>y[1]-x[1]).slice(0,28).map(x=>x[0]),set=new Set(nodes),pos=new Map();nodes.forEach((n,i)=>pos.set(n,[Math.cos(2*Math.PI*i/nodes.length),Math.sin(2*Math.PI*i/nodes.length)]));
+  const ex=[],ey=[];for(const [k,c] of edgeCounts){const [s,t]=k.split('\u0000');if(!set.has(s)||!set.has(t))continue;const a1=pos.get(s),a2=pos.get(t);for(let r=0;r<Math.min(4,c);r++){ex.push(a1[0],a2[0],null);ey.push(a1[1],a2[1],null)}}
+  const traces=[{x:ex,y:ey,mode:'lines',type:'scatter',hoverinfo:'skip',line:{width:1,color:'rgba(125,211,252,.22)'}},{x:nodes.map(n=>pos.get(n)[0]),y:nodes.map(n=>pos.get(n)[1]),mode:'markers+text',type:'scatter',text:nodes.map(n=>n.length>14?n.slice(0,12)+'…':n),textposition:'top center',marker:{size:nodes.map(n=>10+Math.sqrt(nodeCount.get(n))*4)},hovertext:nodes.map(n=>`${n}<br>接続 ${nodeCount.get(n)}`),hoverinfo:'text'}];
+  Plotly.newPlot('replyNetwork',traces,{...layoutBase,xaxis:{visible:false},yaxis:{visible:false},showlegend:false,margin:{l:10,r:10,t:10,b:10}},plotConfig);
+}
+function renderRepetition(a){
+  $('duplicateTable').innerHTML=tableHtml(['回数','レス番号','本文'],a.exactGroups.map(g=>[g.posts.length,g.posts.map(p=>'&gt;&gt;'+p.num).join(' '),esc(g.preview.replace(/\n/g,' '))]));
+  $('nearDuplicateTable').innerHTML=tableHtml(['類似度','組','本文A / B'],a.nearDuplicates.map(x=>[pct(x.similarity),`&gt;&gt;${x.a.num} ↔ &gt;&gt;${x.b.num}`,esc(x.a.body.replace(/\n/g,' ').slice(0,90))+'<br><span class="muted">'+esc(x.b.body.replace(/\n/g,' ').slice(0,90))+'</span>']));
+}
+function renderSegments(a){
+  $('segmentTerms').innerHTML=a.segments.map((s,i)=>`<div class="panel" style="margin:8px 0;background:var(--panel2)"><strong>区間${s.index}</strong>（レス ${s.posts[0]?.num??'-'}〜${s.posts.at(-1)?.num??'-'}）<div style="margin-top:6px">${a.segmentTerms[i].map(x=>`<span class="pill" title="区間内${x.count}レス">${esc(x.text)}</span>`).join('')}</div></div>`).join('');
+}
+function renderData(a){
+  const s=a.summary; const missingDates=s.posts-s.dated;
+  $('qualityBox').innerHTML=`<h2>抽出品質</h2><p>日時カバー率 <strong>${pct(s.dateCoverage)}</strong>（${fmt(s.dated)}/${fmt(s.posts)}件、欠損${fmt(missingDates)}件） / IDカバー率 <strong>${pct(s.idCoverage)}</strong> / 文字化け記号率 <strong>${pct(s.replacementRate,3)}</strong></p><p class="muted">ページ境界をまたぐ日時にも対応しています。なお、元PDFで日時が「NG」に置換されているレスは推測で補いません。IDはPDFの表示順から割り当てるため、内部テキスト順が特殊なページではずれる場合があります。</p>`;
+  $('postTable').innerHTML=tableHtml(['No.','日時','ID','名前','頁','文字','返信先','本文'],a.posts.slice(0,1000).map(p=>[p.num,esc(p.date),esc(p.id),esc(p.name),esc(p.pages.join(',')),p.length,esc(p.replyTargets.join(',')),esc(p.body.replace(/\n/g,' ').slice(0,220))]));
+  $('downloadCsv').onclick=()=>{const h=['num','date','id','name','pages','length','reply_targets','has_url','has_aa','is_long','body'];const lines=[h.join(',')];for(const p of a.posts)lines.push([p.num,p.date,p.id,p.name,p.pages.join('|'),p.length,p.replyTargets.join('|'),p.hasUrl,p.hasAA,p.isLong,p.body].map(csvCell).join(','));download('posts.csv','\ufeff'+lines.join('\n'),'text/csv;charset=utf-8')};
+  $('downloadJson').onclick=()=>download('summary.json',JSON.stringify({sources:state.sourceNames,summary:{...s,start:s.start?.toISOString(),end:s.end?.toISOString()},top_phrases:a.phraseData.slice(0,50),top_lines:a.lineData.slice(0,50),segment_terms:a.segmentTerms,exact_duplicate_groups:a.exactGroups.slice(0,50).map(g=>({posts:g.posts.map(p=>p.num),preview:g.preview})),near_duplicates:a.nearDuplicates.slice(0,50).map(x=>({a:x.a.num,b:x.b.num,similarity:x.similarity}))},null,2),'application/json');
+}
+</script>
+</body>
+</html>
