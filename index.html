@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>スレ・長文テキスト分析器 v4.0</title>
+  <title>スレ・長文テキスト分析器 v5.0</title>
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <style>
@@ -55,7 +55,7 @@
 </head>
 <body>
 <header>
-  <h1>スレ・長文テキスト分析器 <small style="font-size:.45em;color:var(--accent)">v4.0</small></h1>
+  <h1>スレ・長文テキスト分析器 <small style="font-size:.45em;color:var(--accent)">v5.0</small></h1>
   <div class="muted">PDF / TXT / HTMLを端末内で解析。レス速度、参加者、返信網、頻出句、コピペ、区間ごとの流行語まで一気に出します。</div>
 </header>
 <main>
@@ -299,14 +299,19 @@ function joinPdfItemsByRows(items){
   return repairPdfLines(lines);
 }
 
-function probePdfExtraction(pages){
-  const joined=pages.join('\n');
-  const nums=[...joined.matchAll(/▾\s*(\d{1,4})/g)].map(m=>+m[1]);
-  const unique=new Set(nums.filter(n=>n>=1&&n<=1001));
-  const dates=(joined.match(/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}(?:\([^)]*\))?\s*\d{1,2}:\d{2}:\d{2}/g)||[]).length;
-  let ordered=0,last=0;
-  for(const n of nums){ if(n>=last){ordered++;last=n;} }
-  return {unique:unique.size,dates,ordered,score:unique.size*10000+dates*10+ordered};
+function evaluatePdfCandidate(pageTexts,label,sourceName){
+  const pages=pageTexts.map((text,i)=>({text,page:i+1,source:sourceName}));
+  const parsed=parseArchivePages(pages).filter(p=>p.num>=1&&p.num<=1001);
+  const uniqueNums=new Set(parsed.map(p=>p.num));
+  const dates=parsed.filter(p=>p.date && parseDate(p.date)).length;
+  const ids=parsed.filter(p=>p.id).length;
+  const names=parsed.filter(p=>p.name).length;
+  const bodyChars=parsed.reduce((s,p)=>s+String(p.body||'').length,0);
+  const expected=uniqueNums.has(1000)?1000:(uniqueNums.size?Math.max(...uniqueNums):0);
+  const coverage=expected?uniqueNums.size/expected:0;
+  // 実際にパーサーへ通した結果で選ぶ。マーカーが見えただけで勝利宣言する旧仕様は廃止。
+  const score=uniqueNums.size*1e9+dates*1e6+ids*1e4+names*100+Math.min(bodyChars,999999);
+  return {label,pages,parsed,unique:uniqueNums.size,dates,ids,names,bodyChars,coverage,score};
 }
 
 async function extractPdf(file,fi,total){
@@ -321,11 +326,16 @@ async function extractPdf(file,fi,total){
     spatialPages.push(joinPdfItemsByRows(content.items).join('\n'));
     if(i%8===0)await new Promise(r=>setTimeout(r,0));
   }
-  const a=probePdfExtraction(streamPages), b=probePdfExtraction(spatialPages);
-  const chosen=a.score>=b.score?streamPages:spatialPages;
-  state.pdfExtractionMode=a.score>=b.score?'stream-order':'spatial-row';
-  state.pdfExtractionProbe={stream:a,spatial:b};
-  return chosen;
+  const a=evaluatePdfCandidate(streamPages,'stream-order',file.name);
+  const b=evaluatePdfCandidate(spatialPages,'spatial-row',file.name);
+  const chosen=a.score>=b.score?a:b;
+  state.pdfExtractionMode=chosen.label;
+  state.pdfExtractionProbe={
+    stream:{unique:a.unique,dates:a.dates,ids:a.ids,names:a.names,coverage:a.coverage},
+    spatial:{unique:b.unique,dates:b.dates,ids:b.ids,names:b.names,coverage:b.coverage},
+    chosen:chosen.label
+  };
+  return chosen.pages.map(p=>p.text);
 }
 
 function cleanBodyText(s){
@@ -368,7 +378,7 @@ function parseCategoryInput(){
 
 function parseAllPages(pages){
   const joined=pages.map(p=>p.text).join('\n');
-  const markerCount=(joined.match(/^.*?▾\s*\d{1,4}(?:\s+[^\n]+)?\s*$/gm)||[]).length;
+  const markerCount=(joined.match(/▾\s*\d{1,4}/g)||[]).length;
   let posts;
   if(markerCount>=5) posts=parseArchivePages(pages);
   else {
@@ -392,93 +402,127 @@ ${p.body}`)));
 function parseArchivePages(pages){
   const posts=[]; let previous=null;
   const dateRe=/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}(?:\([^)]*\))?\s*\d{1,2}:\d{2}:\d{2}/;
-  // マーカーが行頭でなくても拾う。PDFの文字座標が数pxずれるだけで投稿を消す間抜けな仕様は廃止。
-  const markerRe=/^[ \t]*([^\n]*?)[ \t]*▾[ \t]*(\d{1,4})(?:[ \t]+([^\n]*?))?[ \t]*$/gm;
+  const markerRe=/▾[ \t]*(\d{1,4})/g;
+
+  function plausibleName(s){
+    const t=String(s||'').trim();
+    if(!t || t.length>120 || dateRe.test(t) || /(?:^|\s)ID:\S+/.test(t) ||
+       /^NG(?:\s+NG)?$/.test(t) || /https?:\/\/|ttp:\/\//i.test(t) ||
+       /^>>/.test(t) || /^[\d\s:：\/\-()（）]+$/.test(t))return '';
+    return t;
+  }
 
   for(const pg of pages){
     const raw=pg.text.replace(/\r/g,'');
-    const ids=[...raw.matchAll(/ID:([^\s]+)/g)].map(m=>m[1]);
+    const pageIds=[...raw.matchAll(/ID:([^\s]+)/g)].map(m=>m[1]);
     let idCursor=0;
-    const text=raw.replace(/\s*ID:[^\s]+/g,'');
-    const matches=[...text.matchAll(markerRe)];
-    const prefix=matches.length?text.slice(0,matches[0].index):text;
+    const matches=[...raw.matchAll(markerRe)];
 
+    // 前ページから続く本文。次ページ最初のマーカーより前だけを前レスへ足す。
+    const prefix=matches.length?raw.slice(0,matches[0].index):raw;
     if(previous && prefix.trim() && !/^\s*(?:トップページ|Thread)\b/.test(prefix.trim())){
-      const lines=prefix.trim().split(/\n/).map(x=>x.trimEnd());
-      let contentStart=0;
+      let prefixLines=prefix.split('\n').map(x=>x.trimEnd());
+      let headerEnd=-1;
+
+      // 前ページ末尾にマーカーだけ残り、日時・IDが次ページ冒頭へ送られたケース。
       if(!previous.date){
-        const head=lines.slice(0,Math.min(10,lines.length));
-        // ページ冒頭には右欄由来の「NG」が先に並ぶことがある。
-        // 先に日時を探し、日時が本当に無い場合だけNG扱いにする。
-        const dateAt=head.findIndex(line=>dateRe.test(line));
-        if(dateAt>=0){
-          previous.date=(head[dateAt].match(dateRe)||[''])[0];
-          contentStart=dateAt+1;
-          if(!previous.id && ids[idCursor])previous.id=ids[idCursor++];
-        }else{
-          const ngAt=head.findIndex(line=>/^NG(?:\s+NG)?\s*$/.test(line.trim()));
-          if(ngAt>=0)contentStart=ngAt+1;
+        for(let j=0;j<Math.min(10,prefixLines.length);j++){
+          const dm=prefixLines[j].match(dateRe);
+          if(dm){
+            previous.date=dm[0];
+            const im=prefixLines[j].match(/(?:^|\s)ID:([^\s]+)/);
+            if(im)previous.id=im[1];
+            else if(pageIds[idCursor])previous.id=pageIds[idCursor++];
+            headerEnd=Math.max(headerEnd,j);
+            break;
+          }
+          if(/^NG(?:\s+NG)?\s*$/.test(prefixLines[j].trim())){
+            headerEnd=Math.max(headerEnd,j);
+            break;
+          }
         }
       }
-      const continuation=lines.slice(contentStart).join('\n').trim();
-      if(continuation)previous.body+='\n'+continuation;
+
+      let continuation=prefixLines.slice(headerEnd+1).join('\n');
+      // ページ上部にIDだけが並ぶ抽出方式では、それを本文へ混ぜない。
+      continuation=continuation.replace(/(?:^|\n)\s*ID:[^\s]+\s*(?=\n|$)/g,'\n');
+      continuation=cleanBodyText(continuation);
+      if(continuation)previous.body+=(previous.body?'\n':'')+continuation;
       if(!previous.pages.includes(pg.page))previous.pages.push(pg.page);
     }
 
     const pagePosts=[];
     for(let i=0;i<matches.length;i++){
       const m=matches[i];
-      const start=m.index+m[0].length;
-      const end=i+1<matches.length?matches[i+1].index:text.length;
-      const lines=text.slice(start,end).trim().split(/\n/).map(x=>x.trimEnd());
+      const num=+m[1];
+      const markerEnd=m.index+m[0].length;
+      const end=i+1<matches.length?matches[i+1].index:raw.length;
 
-      const num=+m[2];
-      const before=(m[1]||'').trim();
-      const after=(m[3]||'').trim();
-      let name=(after||before).trim();
-      let date='',dateIdx=-1;
+      const lineStart=raw.lastIndexOf('\n',m.index-1)+1;
+      const lineEndRaw=raw.indexOf('\n',markerEnd);
+      const lineEnd=lineEndRaw<0?end:Math.min(lineEndRaw,end);
+      const beforeLine=raw.slice(lineStart,m.index).trim();
+      const sameLine=raw.slice(markerEnd,lineEnd).trim();
 
-      // PDFで名前行がマーカーの直前に飛んだ場合、最初の行は日時になる。
-      // 旧版はそれを名前として食い、次レスの日時まで飲み込んでいた。
-      if(name && dateRe.test(name)){
-        date=(name.match(dateRe)||[''])[0];
-        name='';
-        dateIdx=-2; // 日時は見出し行にあった
+      let segment=raw.slice(markerEnd,end);
+      let lines=segment.split('\n').map(x=>x.trimEnd());
+      if(lines.length && lines[0].trim()===sameLine) {
+        // そのまま保持。後でヘッダー行として処理。
       }
 
-      if(!name && lines.length){
-        const first=lines[0].trim();
-        const dm=first.match(dateRe);
-        if(dm){date=dm[0];dateIdx=0;}
-        else if(/^NG(?:\s+NG)?\s*$/.test(first)){dateIdx=0;}
-        else name=(lines.shift()||'').trim();
+      const head=lines.slice(0,Math.min(10,lines.length));
+      let date='',dateIdx=-1,id='',idIdx=-1,ngIdx=-1,name='',nameIdx=-1;
+
+      for(let j=0;j<head.length;j++){
+        const dm=head[j].match(dateRe);
+        if(dm && dateIdx<0){date=dm[0];dateIdx=j;}
+        const im=head[j].match(/(?:^|\s)ID:([^\s]+)/);
+        if(im && idIdx<0){id=im[1];idIdx=j;}
+        if(/^NG(?:\s+NG)?\s*$/.test(head[j].trim()) && ngIdx<0)ngIdx=j;
       }
 
-      if(!date && dateIdx<0){
-        // 名前の直後3行までだけを見る。次レスの日時を盗むのは禁止。
-        for(let j=0;j<Math.min(3,lines.length);j++){
-          const dm=lines[j].match(dateRe);
-          if(dm){date=dm[0];dateIdx=j;break;}
-          if(/^NG(?:\s+NG)?\s*$/.test(lines[j].trim())){dateIdx=j;break;}
-        }
+      // 同一行に「名前 日時 ID」が全部乗っていても名前だけを取り出す。
+      for(let j=0;j<Math.min(4,head.length);j++){
+        let stripped=head[j]
+          .replace(dateRe,' ')
+          .replace(/(?:^|\s)ID:[^\s]+/g,' ')
+          .replace(/\bNG\b/g,' ')
+          .replace(/\s+/g,' ')
+          .trim();
+        const cand=plausibleName(stripped);
+        if(cand){name=cand;nameIdx=j;break;}
+      }
+      if(!name){
+        const cand=plausibleName(sameLine)||plausibleName(beforeLine);
+        if(cand)name=cand;
       }
 
-      const bodyStart=dateIdx>=0?dateIdx+1:0;
-      const body=lines.slice(bodyStart).join('\n').trim();
-      const p={num,name,date,id:'',body,pages:[pg.page],source:pg.source};
+      // ヘッダーの最後より後を本文とする。次レスのマーカーで区切ってあるので日時泥棒は起きない。
+      let headerEnd=Math.max(dateIdx,idIdx,ngIdx,nameIdx);
+      if(headerEnd<0 && sameLine)headerEnd=0;
+      let body=lines.slice(headerEnd+1).join('\n').trim();
+
+      // ストリーム順でヘッダー要素が同じ行の後半に残った場合を除去。
+      body=body.replace(/^\s*(?:ID:[^\s]+\s*)+/,'');
+
+      const p={num,name,date,id,body,pages:[pg.page],source:pg.source};
       posts.push(p);pagePosts.push(p);previous=p;
     }
 
-    const assignable=pagePosts.filter(p=>p.date);
-    for(let i=0;i<assignable.length && idCursor<ids.length;i++,idCursor++){
-      assignable[i].id=ids[idCursor];
+    // IDが右欄の塊として抽出された場合の補完。
+    for(const p of pagePosts){
+      if(!p.id && p.date && idCursor<pageIds.length)p.id=pageIds[idCursor++];
+      else if(p.id){
+        const at=pageIds.indexOf(p.id,idCursor);
+        if(at>=idCursor)idCursor=at+1;
+      }
     }
   }
 
-  // 同じレス番号が重複した場合は情報量の多い方を残す。
+  // 同じレス番号は情報量の多い方を残す。
   const best=new Map();
   for(const p of posts){
-    const score=(p.date?1000:0)+(p.id?500:0)+(p.name?100:0)+p.body.length;
+    const score=(p.date?100000:0)+(p.id?50000:0)+(p.name?10000:0)+String(p.body||'').length;
     const old=best.get(p.num);
     if(!old || score>old.score)best.set(p.num,{p,score});
   }
@@ -503,12 +547,12 @@ async function analyzeAll(){
   if(!state.pages.length)return;
   try{
     $('analyzeBtn').disabled=true; setStatus('レス構造を解析中…'); await tick();
-    const posts=parseAllPages(state.pages).filter(p=>p.body || p.name);
+    const posts=parseAllPages(state.pages);
     state.posts=posts; setStatus(`抽出完了: ${posts.length}レス。統計を計算中…`); await tick();
     state.analysis=computeAnalysis(posts); setStatus('グラフを描画中…'); await tick();
     renderAll(state.analysis); $('results').classList.remove('hidden');
     const extra=posts.length-state.analysis.summary.posts;
-    setStatus(`完了[v4.0]: ${state.analysis.summary.posts}レスを解析しました${extra>0?`（終了表示など${extra}件を除外）`:''}。`);
+    setStatus(`完了[v5.0]: ${state.analysis.summary.posts}レスを解析しました${extra>0?`（終了表示など${extra}件を除外）`:''}。`);
   }catch(err){ console.error(err); setStatus('解析失敗: '+err.message); }
   finally{$('analyzeBtn').disabled=false;}
 }
@@ -737,9 +781,11 @@ function renderSegments(a){
 }
 function renderData(a){
   const s=a.summary; const missingDates=s.posts-s.dated;
-  const mode=state.pdfExtractionMode?` / PDF抽出方式 <strong>${esc(state.pdfExtractionMode)}</strong>`:'';
+  const probe=state.pdfExtractionProbe;
+  const probeText=probe?`（stream ${probe.stream.unique}件・日時${probe.stream.dates} / spatial ${probe.spatial.unique}件・日時${probe.spatial.dates}）`:'';
+  const mode=state.pdfExtractionMode?` / PDF抽出方式 <strong>${esc(state.pdfExtractionMode)}</strong>${esc(probeText)}`:'';
   const hard=s.dateCoverage<.80||s.numberCoverage<.95;
-  $('qualityBox').innerHTML=`<h2>抽出品質 <small>v4.0</small></h2>${hard?'<p class="warning"><strong>解析停止相当:</strong> 抽出率が低すぎます。この状態の期間・速度・参加者分析を信用してはいけません。</p>':''}<p>レス番号カバー率 <strong>${pct(s.numberCoverage)}</strong> / 日時カバー率 <strong>${pct(s.dateCoverage)}</strong>（${fmt(s.dated)}/${fmt(s.posts)}件、欠損${fmt(missingDates)}件） / IDカバー率 <strong>${pct(s.idCoverage)}</strong> / 文字破損疑い率 <strong>${pct(s.replacementRate,3)}</strong>${mode}</p><p class="muted">元PDFで日時・IDが「NG」のレスは推測で補いません。v4.0はPDF.jsのストリーム順と座標行の両方を試し、レス番号・日時の回収率が高い方を自動採用します。</p>`;
+  $('qualityBox').innerHTML=`<h2>抽出品質 <small>v5.0</small></h2>${hard?'<p class="warning"><strong>解析停止相当:</strong> 抽出率が低すぎます。この状態の期間・速度・参加者分析を信用してはいけません。</p>':''}<p>レス番号カバー率 <strong>${pct(s.numberCoverage)}</strong> / 日時カバー率 <strong>${pct(s.dateCoverage)}</strong>（${fmt(s.dated)}/${fmt(s.posts)}件、欠損${fmt(missingDates)}件） / IDカバー率 <strong>${pct(s.idCoverage)}</strong> / 文字破損疑い率 <strong>${pct(s.replacementRate,3)}</strong>${mode}</p><p class="muted">元PDFで日時・IDが「NG」のレスは推測で補いません。v5.0はPDF.jsのストリーム順と座標行の両方を実際のレスパーサーへ通し、レス番号・日時・IDの回収結果が良い方を採用します。</p>`;
   $('postTable').innerHTML=tableHtml(['No.','日時','ID','名前','頁','文字','返信先','本文'],a.posts.slice(0,1000).map(p=>[p.num,esc(p.date),esc(p.id),esc(p.name),esc(p.pages.join(',')),p.length,esc(p.replyTargets.join(',')),esc(p.body.replace(/\n/g,' ').slice(0,220))]));
   $('downloadCsv').onclick=()=>{const h=['num','date','id','name','pages','length','reply_targets','has_url','has_aa','is_long','body'];const lines=[h.join(',')];for(const p of a.posts)lines.push([p.num,p.date,p.id,p.name,p.pages.join('|'),p.length,p.replyTargets.join('|'),p.hasUrl,p.hasAA,p.isLong,p.body].map(csvCell).join(','));download('posts.csv','\ufeff'+lines.join('\n'),'text/csv;charset=utf-8')};
   $('downloadJson').onclick=()=>download('summary.json',JSON.stringify({sources:state.sourceNames,summary:{...s,start:s.start?.toISOString(),end:s.end?.toISOString()},top_phrases:a.phraseData.slice(0,50),top_lines:a.lineData.slice(0,50),segment_terms:a.segmentTerms,exact_duplicate_groups:a.exactGroups.slice(0,50).map(g=>({posts:g.posts.map(p=>p.num),preview:g.preview})),near_duplicates:a.nearDuplicates.slice(0,50).map(x=>({a:x.a.num,b:x.b.num,similarity:x.similarity}))},null,2),'application/json');
