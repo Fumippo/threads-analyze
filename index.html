@@ -229,6 +229,28 @@ async function loadFiles(files){
   }catch(err){ console.error(err); setStatus('読み込み失敗: '+err.message); }
 }
 
+function repairPdfLines(lines){
+  const out=[];
+  const dateOnly=/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}(?:\([^)]*\))?(?!\s*\d{1,2}:\d{2}:\d{2})/;
+  const timeOnly=/^\s*\d{1,2}:\d{2}:\d{2}(?:\s+ID:\S+)?\s*$/;
+  for(let i=0;i<lines.length;i++){
+    let line=lines[i].replace(/\u0000/g,'').trimEnd();
+
+    // 「▾」とレス番号が別行になったPDFを回収。
+    if(/^\s*▾\s*$/.test(line) && i+1<lines.length && /^\s*\d{1,4}(?:\s+.*)?\s*$/.test(lines[i+1])){
+      line=`▾ ${lines[++i].trim()}`;
+    }
+
+    // 日付と時刻が別行になったPDFを回収。
+    if(dateOnly.test(line) && !/\d{1,2}:\d{2}:\d{2}/.test(line) &&
+       i+1<lines.length && timeOnly.test(lines[i+1])){
+      line+=` ${lines[++i].trim()}`;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
 async function extractPdf(file,fi,total){
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise; const pages=[];
@@ -237,28 +259,39 @@ async function extractPdf(file,fi,total){
     const page=await pdf.getPage(i); const content=await page.getTextContent({normalizeWhitespace:false});
     const rows=[];
     for(const item of content.items){
-      const x=item.transform?.[4] ?? 0, y=item.transform?.[5] ?? 0, size=Math.abs(item.transform?.[0] ?? 10);
-      let row=rows.find(r=>Math.abs(r.y-y)<=2.5);
+      const x=item.transform?.[4] ?? 0, y=item.transform?.[5] ?? 0;
+      const size=Math.max(1,Math.abs(item.transform?.[0] ?? 10));
+      const width=Math.max(size*.25, Number(item.width)||String(item.str||'').length*size*.45);
+      let row=rows.find(r=>Math.abs(r.y-y)<=3.6);
       if(!row){row={y,items:[]};rows.push(row)}
-      row.items.push({x,size,str:item.str});
+      row.items.push({x,size,width,str:item.str});
     }
     rows.sort((a,b)=>b.y-a.y);
     const lines=rows.map(r=>{
       r.items.sort((a,b)=>a.x-b.x); let line='',right=-Infinity;
       for(const it of r.items){
-        const gap=it.x-right; if(line && gap>Math.max(4,it.size*.55))line+=' ';
-        line+=it.str; right=it.x+Math.max(it.size*.5,it.str.length*it.size*.45);
+        const gap=it.x-right;
+        if(line && gap>Math.max(3.2,it.size*.35))line+=' ';
+        line+=it.str;
+        right=it.x+it.width;
       }
       return line.trimEnd();
     });
-    pages.push(lines.join('\n').replace(/\u0000/g,''));
+    pages.push(repairPdfLines(lines).join('\n').replace(/\u0000/g,''));
     if(i%8===0) await new Promise(r=>setTimeout(r,0));
   }
   return pages;
 }
 
+function cleanBodyText(s){
+  return String(s??'').split(/\n/).filter(line=>{
+    const t=line.trim();
+    return !/^(?:トップページ|全部|前100|次100|最新50|レス数が1000を超えています|read\.cgi\b|Walang Kapalit|Donguri System Team|５ちゃんねる|1001コメント\b|\d+KB\b)/i.test(t);
+  }).join('\n').trim();
+}
+
 function normalizeText(s){
-  return String(s??'').normalize('NFKC')
+  return String(s??'').normalize('NFKC').normalize('NFC')
     .replace(/https?:\/\/\S+|ttp:\/\/\S+/gi,' ')
     .replace(/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}(?:\([^)]*\))?\s*\d{1,2}:\d{2}:\d{2}/g,' ')
     .replace(/\b\d{1,2}:\d{2}:\d{2}\b/g,' ').replace(/\bID:[^\s]+/gi,' ')
@@ -266,7 +299,7 @@ function normalizeText(s){
     .replace(/[\s\u3000]+/g,' ').replace(/[「」『』【】〈〉《》\[\]（）()…・、。!！?？:：;；“”"'`~〜～＿_\-—=＝+＋*＊\/\\|｜<>＜＞]/g,'').trim().toLowerCase();
 }
 function parseDate(s){
-  let m=String(s).match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:\([^)]*\))?\s+(\d{1,2}):(\d{2}):(\d{2})/);
+  let m=String(s).match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:\([^)]*\))?\s*(\d{1,2}):(\d{2}):(\d{2})/);
   if(!m)return null; const d=new Date(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]); return Number.isNaN(+d)?null:d;
 }
 function extractReplyTargets(text){
@@ -290,7 +323,7 @@ function parseCategoryInput(){
 
 function parseAllPages(pages){
   const joined=pages.map(p=>p.text).join('\n');
-  const markerCount=(joined.match(/^\s*▾\s*\d{1,4}\s*$/gm)||[]).length;
+  const markerCount=(joined.match(/^\s*▾\s*\d{1,4}(?:\s+[^\n]+)?\s*$/gm)||[]).length;
   let posts;
   if(markerCount>=5) posts=parseArchivePages(pages);
   else {
@@ -299,7 +332,7 @@ function parseAllPages(pages){
   }
   const groups=parseCategoryInput();
   for(const p of posts){
-    p.body=p.body.trim(); p.dateObj=p.date?parseDate(p.date):null; p.length=[...p.body].length; p.lines=p.body?p.body.split(/\n/).length:0;
+    p.body=cleanBodyText(p.body); p.dateObj=p.date?parseDate(p.date):null; p.length=[...p.body].length; p.lines=p.body?p.body.split(/\n/).length:0;
     p.normalized=normalizeText(p.body); p.replyTargets=extractReplyTargets(p.body); p.hasUrl=/(?:https?:\/\/|ttp:\/\/|www\.)/i.test(p.body);
     p.aaScore=aaScore(p.body); p.hasAA=p.aaScore>=0.10; p.isLong=p.length>=500 || p.lines>=12;
     p.categories={}; const low=p.body.normalize('NFKC').toLowerCase();
@@ -310,24 +343,23 @@ function parseAllPages(pages){
 
 function parseArchivePages(pages){
   const posts=[]; let previous=null;
-  const dateRe=/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}(?:\([^)]*\))?\s+\d{1,2}:\d{2}:\d{2}/;
+  const dateRe=/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}(?:\([^)]*\))?\s*\d{1,2}:\d{2}:\d{2}/;
+  const markerRe=/^\s*▾\s*(\d{1,4})(?:\s+([^\n]+?))?\s*$/gm;
 
   for(const pg of pages){
     const raw=pg.text.replace(/\r/g,'');
     const ids=[...raw.matchAll(/ID:([^\s]+)/g)].map(m=>m[1]);
     let idCursor=0;
     const text=raw.replace(/\s*ID:[^\s]+/g,'');
-    const markerRe=/^\s*▾\s*(\d{1,4})\s*$/gm;
     const matches=[...text.matchAll(markerRe)];
     const prefix=matches.length?text.slice(0,matches[0].index):text;
 
-    // レス見出しだけが前ページ末尾にあり、日時・本文が次ページへ送られた場合を回収する。
+    // レス見出しが前ページ末尾、日時が次ページ冒頭になった場合。
     if(previous && prefix.trim() && !/^\s*(?:トップページ|Thread)\b/.test(prefix.trim())){
       const lines=prefix.trim().split(/\n/).map(x=>x.trimEnd());
       let contentStart=0;
-
       if(!previous.date){
-        for(let j=0;j<Math.min(12,lines.length);j++){
+        for(let j=0;j<Math.min(6,lines.length);j++){
           const dm=lines[j].match(dateRe);
           if(dm){
             previous.date=dm[0];
@@ -335,13 +367,12 @@ function parseArchivePages(pages){
             if(!previous.id && ids[idCursor]) previous.id=ids[idCursor++];
             break;
           }
-          if(lines[j].trim()==='NG'){
+          if(/^NG(?:\s+NG)?\s*$/.test(lines[j].trim())){
             contentStart=j+1;
             break;
           }
         }
       }
-
       const continuation=lines.slice(contentStart).join('\n').trim();
       if(continuation) previous.body += '\n'+continuation;
       if(!previous.pages.includes(pg.page)) previous.pages.push(pg.page);
@@ -349,19 +380,29 @@ function parseArchivePages(pages){
 
     const pagePosts=[];
     for(let i=0;i<matches.length;i++){
-      const m=matches[i], start=m.index+m[0].length, end=i+1<matches.length?matches[i+1].index:text.length;
+      const m=matches[i];
+      const start=m.index+m[0].length;
+      const end=i+1<matches.length?matches[i+1].index:text.length;
       const lines=text.slice(start,end).trim().split(/\n/).map(x=>x.trimEnd());
-      const num=+m[1], name=(lines.shift()||'').trim(); let date='', dateIdx=-1;
-      for(let j=0;j<Math.min(12,lines.length);j++){
+
+      const num=+m[1];
+      let name=(m[2]||'').trim();
+      if(!name) name=(lines.shift()||'').trim();
+
+      let date='', dateIdx=-1;
+      // 日時はレス見出し直後にしか採用しない。本文中の引用日時を誤認しない。
+      for(let j=0;j<Math.min(6,lines.length);j++){
         const dm=lines[j].match(dateRe);
         if(dm){date=dm[0];dateIdx=j;break;}
-        if(lines[j].trim()==='NG'){dateIdx=j;break;}
+        if(/^NG(?:\s+NG)?\s*$/.test(lines[j].trim())){dateIdx=j;break;}
       }
+
       const body=lines.slice(dateIdx>=0?dateIdx+1:0).join('\n').trim();
       const p={num,name,date,id:'',body,pages:[pg.page],source:pg.source};
       posts.push(p); pagePosts.push(p); previous=p;
     }
 
+    // このPDFではNGレスだけIDも欠けるため、日時があるレスへ上から順に対応付ける。
     const assignable=pagePosts.filter(p=>p.date);
     for(let i=0;i<assignable.length && idCursor<ids.length;i++,idCursor++){
       assignable[i].id=ids[idCursor];
@@ -391,7 +432,9 @@ async function analyzeAll(){
     const posts=parseAllPages(state.pages).filter(p=>p.body || p.name);
     state.posts=posts; setStatus(`抽出完了: ${posts.length}レス。統計を計算中…`); await tick();
     state.analysis=computeAnalysis(posts); setStatus('グラフを描画中…'); await tick();
-    renderAll(state.analysis); $('results').classList.remove('hidden'); setStatus(`完了: ${posts.length}レスを解析しました。`);
+    renderAll(state.analysis); $('results').classList.remove('hidden');
+    const extra=posts.length-state.analysis.summary.posts;
+    setStatus(`完了: ${state.analysis.summary.posts}レスを解析しました${extra>0?`（終了表示など${extra}件を除外）`:''}。`);
   }catch(err){ console.error(err); setStatus('解析失敗: '+err.message); }
   finally{$('analyzeBtn').disabled=false;}
 }
@@ -409,18 +452,34 @@ function computeAnalysis(posts){
   const replyLinks=[]; const byNum=new Map(valid.map(p=>[p.num,p]));
   for(const p of valid)for(const t of p.replyTargets){const target=byNum.get(t);replyLinks.push({source:p,target,num:t});}
   const targetCounts=new Map(); for(const e of replyLinks)targetCounts.set(e.num,(targetCounts.get(e.num)||0)+1);
-  const interval=chooseInterval(duration); const timeline=makeTimeline(dated,start,end,interval);
+  const preliminaryDateCoverage=dated.length/Math.max(1,valid.length);
+  const usableDuration=preliminaryDateCoverage>=.80?duration:NaN;
+  const interval=chooseInterval(usableDuration); const timeline=Number.isFinite(usableDuration)?makeTimeline(dated,start,end,interval):[];
   const segments=makeSegments(valid,10); const phraseData=extractPhrases(valid); const lineData=extractLines(valid);
   const nearDuplicates=findNearDuplicates(valid); const segmentTerms=distinctiveTerms(segments,valid);
   const keywords=$('keywordInput').value.split(/[,，\n]/).map(x=>x.trim()).filter(Boolean);
   const keywordTrend=keywords.map(k=>({keyword:k,values:segments.map(s=>s.posts.filter(p=>p.body.normalize('NFKC').toLowerCase().includes(k.normalize('NFKC').toLowerCase())).length)}));
-  const giniId=gini([...idCounts.values()]);
+  const dateCoverage=dated.length/Math.max(1,valid.length);
+  const idCoverage=valid.filter(p=>p.id).length/Math.max(1,valid.length);
+  const uniqueNums=new Set(valid.map(p=>p.num).filter(Number.isFinite));
+  const maxNum=uniqueNums.size?Math.max(...uniqueNums):0;
+  const expectedMax=maxNum>=900?1000:maxNum;
+  const missingNumbers=[];
+  for(let n=1;n<=expectedMax;n++)if(!uniqueNums.has(n))missingNumbers.push(n);
+  const numberCoverage=expectedMax?uniqueNums.size/expectedMax:NaN;
+  const timeReliable=dateCoverage>=.80 && Number.isFinite(duration) && duration>0;
+  const idReliable=idCoverage>=.80;
+  const giniId=idReliable?gini([...idCounts.values()]):NaN;
+  const totalChars=Math.max(1,valid.reduce((s,p)=>s+p.length,0));
+  const artifactChars=valid.reduce((s,p)=>s+(p.body.match(/[�\u0000-\u0008\u000b\u000c\u000e-\u001f\u3099\u309a]/g)||[]).length,0);
   const summary={
-    posts:valid.length,dated:dated.length,ids:idCounts.size,names:nameCounts.size,start:Number.isFinite(start)?new Date(start):null,end:Number.isFinite(end)?new Date(end):null,duration,
-    postsPerHour:duration>0?valid.length/(duration/3600000):NaN,medianGap:median(gaps),p90Gap:quantile(gaps,.9),replyRate:valid.filter(p=>p.replyTargets.length).length/Math.max(1,valid.length),
+    posts:valid.length,dated:dated.length,ids:idCounts.size,names:nameCounts.size,start:Number.isFinite(start)?new Date(start):null,end:Number.isFinite(end)?new Date(end):null,
+    duration:timeReliable?duration:NaN,postsPerHour:timeReliable?valid.length/(duration/3600000):NaN,
+    medianGap:timeReliable?median(gaps):NaN,p90Gap:timeReliable?quantile(gaps,.9):NaN,
+    replyRate:valid.filter(p=>p.replyTargets.length).length/Math.max(1,valid.length),
     urlRate:valid.filter(p=>p.hasUrl).length/Math.max(1,valid.length),aaRate:valid.filter(p=>p.hasAA).length/Math.max(1,valid.length),longRate:valid.filter(p=>p.isLong).length/Math.max(1,valid.length),
-    duplicateRate:duplicatePosts/Math.max(1,valid.length),giniId,dateCoverage:dated.length/Math.max(1,valid.length),idCoverage:valid.filter(p=>p.id).length/Math.max(1,valid.length),
-    replacementRate:(valid.reduce((s,p)=>s+(p.body.match(/�/g)||[]).length,0))/Math.max(1,valid.reduce((s,p)=>s+p.length,0))
+    duplicateRate:duplicatePosts/Math.max(1,valid.length),giniId,dateCoverage,idCoverage,numberCoverage,missingNumbers,
+    replacementRate:artifactChars/totalChars,timeReliable,idReliable
   };
   return {posts:valid,dated,idCounts,nameCounts,exactGroups,nearDuplicates,categories,catCounts,replyLinks,targetCounts,byNum,timeline,interval,segments,phraseData,lineData,segmentTerms,keywordTrend,summary};
 }
@@ -447,12 +506,22 @@ function extractLines(posts){
   for(const p of posts){const seen=new Set();for(let line of p.body.split(/\n/)){line=line.trim();const n=normalizeText(line);if(n.length<3||n.length>120||seen.has(n))continue;seen.add(n);const o=m.get(n)||{count:0,text:line,posts:[]};o.count++;if(o.posts.length<8)o.posts.push(p.num);m.set(n,o)}}
   return [...m.values()].filter(x=>x.count>=2).sort((a,b)=>b.count-a.count||b.text.length-a.text.length).slice(0,200);
 }
+function usefulGram(g){
+  const t=String(g||'').replace(/\s+/g,'');
+  if(t.length<3 || /^[0-9]+$/.test(t))return false;
+  const good=(t.match(/[A-Za-z0-9\u3040-\u30ff\u3400-\u9fff]/g)||[]).length;
+  const combining=(t.match(/[\u3099\u309a]/g)||[]).length;
+  if(combining>1 || good/Math.max(1,t.length)<.72)return false;
+  if(/^(?:ver|readcgi|http|https|www)[\s.0-9]*$/i.test(t))return false;
+  return true;
+}
+
 function extractPhrases(posts){
   const df=new Map(), example=new Map();
   for(const p of posts){
     const s=normalizeText(p.body).slice(0,350); const seen=new Set();
     for(let n=3;n<=9;n++)for(let i=0;i+n<=s.length;i++){
-      const g=s.slice(i,i+n); if(/^[0-9]+$/.test(g)||/[\s]/.test(g)||g.length<3)continue; seen.add(g);
+      const g=s.slice(i,i+n); if(/[\s]/.test(g)||!usefulGram(g))continue; seen.add(g);
     }
     for(const g of seen){df.set(g,(df.get(g)||0)+1);if(!example.has(g))example.set(g,p.num)}
   }
@@ -486,7 +555,7 @@ function findNearDuplicates(posts){
 
 function distinctiveTerms(segments,allPosts){
   const global=new Map(); const local=[];
-  function grams(p){const s=normalizeText(p.body).slice(0,260),set=new Set();for(let n=3;n<=7;n++)for(let i=0;i+n<=s.length;i++){const g=s.slice(i,i+n);if(!/^\d+$/.test(g))set.add(g)}return set;}
+  function grams(p){const s=normalizeText(p.body).slice(0,260),set=new Set();for(let n=3;n<=7;n++)for(let i=0;i+n<=s.length;i++){const g=s.slice(i,i+n);if(usefulGram(g))set.add(g)}return set;}
   const caches=new Map();
   for(const p of allPosts){const gs=grams(p);caches.set(p,gs);for(const g of gs)global.set(g,(global.get(g)||0)+1)}
   for(const seg of segments){const m=new Map();for(const p of seg.posts)for(const g of caches.get(p))m.set(g,(m.get(g)||0)+1);
@@ -500,21 +569,46 @@ function renderAll(a){
   renderMetrics(a.summary); renderReport(a); renderTimelines(a); renderCategories(a); renderPhrases(a); renderParticipants(a); renderReplies(a); renderRepetition(a); renderSegments(a); renderData(a);
 }
 function renderMetrics(s){
-  const items=[['レス数',fmt(s.posts)],['期間',durationText(s.duration)],['平均速度',fmt(s.postsPerHour,1)+' /時'],['ID数',fmt(s.ids)],['返信付き',pct(s.replyRate)],['長文率',pct(s.longRate)],['AA率',pct(s.aaRate)],['重複関与',pct(s.duplicateRate)]];
+  const items=[
+    ['レス数',fmt(s.posts)],
+    ['期間',s.timeReliable?durationText(s.duration):'抽出不足'],
+    ['平均速度',s.timeReliable?fmt(s.postsPerHour,1)+' /時':'抽出不足'],
+    ['ID数',s.idReliable?fmt(s.ids):'抽出不足'],
+    ['返信付き',pct(s.replyRate)],['長文率',pct(s.longRate)],['AA率',pct(s.aaRate)],['重複関与',pct(s.duplicateRate)]
+  ];
   $('metrics').innerHTML=items.map(([l,v])=>`<div class="metric"><div class="value">${esc(v)}</div><div class="label">${esc(l)}</div></div>`).join('');
 }
 function renderReport(a){
-  const s=a.summary, peak=a.timeline.reduce((best,x)=>!best||x.count>best.count?x:best,null), topId=[...a.idCounts].sort((x,y)=>y[1]-x[1])[0], topPhrase=a.phraseData[0], topTarget=[...a.targetCounts].sort((x,y)=>y[1]-x[1])[0];
-  const early=a.segmentTerms[0]?.slice(0,5).map(x=>x.text).join('・')||'抽出不足', late=a.segmentTerms.at(-1)?.slice(0,5).map(x=>x.text).join('・')||'抽出不足';
-  let concentration=Number.isFinite(s.giniId)?(s.giniId<.25?'分散型':s.giniId<.5?'中程度に集中':'少数ID集中型'):'不明';
-  $('autoReport').innerHTML=`
-    <p>全体は <strong>${fmt(s.posts)}レス</strong>、日時を読めた範囲では <strong>${esc(durationText(s.duration))}</strong>。平均速度は <strong>${fmt(s.postsPerHour,1)}レス/時</strong>、投稿間隔の中央値は <strong>${fmt(s.medianGap,0)}秒</strong>です。</p>
+  const s=a.summary;
+  const peak=a.timeline.length?a.timeline.reduce((best,x)=>!best||x.count>best.count?x:best,null):null;
+  const topId=s.idReliable?[...a.idCounts].sort((x,y)=>y[1]-x[1])[0]:null;
+  const topPhrase=a.phraseData[0], topTarget=[...a.targetCounts].sort((x,y)=>y[1]-x[1])[0];
+  const early=a.segmentTerms[0]?.slice(0,5).map(x=>x.text).join('・')||'抽出不足';
+  const late=a.segmentTerms.at(-1)?.slice(0,5).map(x=>x.text).join('・')||'抽出不足';
+  const concentration=Number.isFinite(s.giniId)?(s.giniId<.25?'分散型':s.giniId<.5?'中程度に集中':'少数ID集中型'):'判定不能';
+
+  const qualityProblems=[];
+  if(Number.isFinite(s.numberCoverage) && s.numberCoverage<.995) qualityProblems.push(`レス番号 ${pct(s.numberCoverage)}（欠番${s.missingNumbers.length}件）`);
+  if(s.dateCoverage<.80) qualityProblems.push(`日時 ${pct(s.dateCoverage)}`);
+  if(s.idCoverage<.80) qualityProblems.push(`ID ${pct(s.idCoverage)}`);
+
+  const qualityLead=qualityProblems.length
+    ? `<p class="warning"><strong>抽出失敗:</strong> ${esc(qualityProblems.join(' / '))}。期間・速度・参加者集中度は表示停止しました。壊れた数値をもっともらしく断定する機能はありません。</p>`
+    : `<p class="ok"><strong>抽出品質良好:</strong> レス番号 ${pct(s.numberCoverage)} / 日時 ${pct(s.dateCoverage)} / ID ${pct(s.idCoverage)}。</p>`;
+
+  $('autoReport').innerHTML=qualityLead+`
+    <p>全体は <strong>${fmt(s.posts)}レス</strong>${s.timeReliable?`、日時を読めた範囲は <strong>${esc(durationText(s.duration))}</strong>。平均速度は <strong>${fmt(s.postsPerHour,1)}レス/時</strong>、投稿間隔の中央値は <strong>${fmt(s.medianGap,0)}秒</strong>`:'。日時抽出率が不足しているため、期間・平均速度・投稿間隔は算出停止'}です。</p>
     <p>${peak?`最大の山は <strong>${esc(peak.time.toLocaleString('ja-JP'))}</strong> の区間で <strong>${fmt(peak.count)}レス</strong>。`:''}参加者構造は <strong>${concentration}</strong>${topId?`で、最多IDは <code>${esc(topId[0])}</code>（${fmt(topId[1])}レス）`:''}です。</p>
     <p>返信参照を含むレスは <strong>${pct(s.replyRate)}</strong>${topTarget?`。もっとも参照されたのは <strong>&gt;&gt;${topTarget[0]}</strong>（${topTarget[1]}回）`:''}です。完全一致の重複群は <strong>${fmt(a.exactGroups.length)}群</strong>、類似コピペ候補は <strong>${fmt(a.nearDuplicates.length)}組</strong>。</p>
-    <p>${topPhrase?`頻出句の上位は <code>${esc(topPhrase.text)}</code>（${topPhrase.count}レス）です。`:''}区間特徴語は、序盤が <span class="pill">${esc(early)}</span>、終盤が <span class="pill">${esc(late)}</span>。ここは勝手な物語化ではなく、各区間で相対的に強い文字列をそのまま表示しています。</p>
-    <p class="${s.dateCoverage>.8?'ok':'warning'}">抽出品質: 日時 ${pct(s.dateCoverage)} / ID ${pct(s.idCoverage)} / 文字化け記号率 ${pct(s.replacementRate,3)}。PDFの段組みによってID順が崩れる場合があるため、［データ］タブで先頭・末尾を確認してください。</p>`;
+    <p>${topPhrase?`頻出句の上位は <code>${esc(topPhrase.text)}</code>（${topPhrase.count}レス）です。`:''}区間特徴語は、序盤が <span class="pill">${esc(early)}</span>、終盤が <span class="pill">${esc(late)}</span>。</p>
+    <p class="${s.replacementRate<.001?'ok':'warning'}">文字破損疑い率 ${pct(s.replacementRate,3)}。これは「�」だけでなく、孤立した濁点・制御文字も数えます。</p>`;
 }
+
 function renderTimelines(a){
+  if(!a.timeline.length){
+    for(const id of ['overviewTimeline','cumulativePlot','hourPlot']) $(id).innerHTML='<p class="warning">日時抽出率が不足しているため、時系列グラフを停止しました。</p>';
+    return;
+  }
   const x=a.timeline.map(b=>b.time), y=a.timeline.map(b=>b.count), cum=a.timeline.map(b=>b.cumulative);
   Plotly.newPlot('overviewTimeline',[{x,y,type:'bar',name:'レス数'}],{...layoutBase,margin:{l:45,r:15,t:10,b:45}},plotConfig);
   Plotly.newPlot('timelineChart',[{x,y,type:'bar',name:'区間レス数',yaxis:'y1'},{x,y:cum,type:'scatter',mode:'lines',name:'累積',yaxis:'y2'}],{...layoutBase,yaxis:{gridcolor:'#2b3658',title:'レス数'},yaxis2:{overlaying:'y',side:'right',title:'累積',showgrid:false},legend:{orientation:'h'}},plotConfig);
